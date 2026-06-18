@@ -1,0 +1,30 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated build outputs (reproduce with: python build.py && python view.py)
+out/
+*.gpkg
+*.parquet
+map.html
+
+# Downloaded source-data cache
+.cache/
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Secrets / local config
+.jp_api_key
+.env
+*.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

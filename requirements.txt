@@ -1,0 +1,17 @@
+# Core
+pandas>=2.0
+geopandas>=0.14
+shapely>=2.0
+requests>=2.31
+
+# Export (GeoParquet)
+pyarrow>=14
+
+# Optional: fuzzy name crosswalk between polygon datasets (GREG/GeoEPR <-> Murdock)
+rapidfuzz>=3.0
+
+# Optional: Joshua Project Excel download / gated survey files
+openpyxl>=3.1
+
+# Optional: IPUMS International programmatic extracts (gated, needs API key)
+# ipumspy>=0.5
