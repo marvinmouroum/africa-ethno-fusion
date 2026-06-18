@@ -248,6 +248,57 @@ def load_glottolog(macroarea: str = "Africa", level: str = "language") -> gpd.Ge
 
 
 # ---------------------------------------------------------------------------
+# 5b. Glottography (Asher & Moseley 2007)  -- open language-AREA polygons,
+#     keyed on glottocode (the open alternative to commercial WLMS). Each
+#     feature is a (Multi)Polygon for one Glottolog language-level languoid.
+#     We default to the "traditional" layer (historical reconstruction),
+#     which lines up with the Murdock/GREG homeland polygons. The glottocode
+#     is the critical join key -- with Glottolog also loaded, these areas link
+#     to iso639_3 / EA societies through the crosswalk automatically.
+# ---------------------------------------------------------------------------
+def load_glottography(layer: str = "traditional") -> gpd.GeoDataFrame:
+    from . import glottography_cldf as gg
+
+    if layer not in gg.LAYERS:
+        raise ValueError(f"unknown Glottography layer {layer!r}; use one of {list(gg.LAYERS)}")
+    geojson_url, csv_url = gg.LAYERS[layer]
+
+    # languages.geojson is large (~50-90 MB) but cached after first fetch; the
+    # languages.csv is small and only used to enrich the source-map reference.
+    geojson_path = cached_download(geojson_url, f"glottography_{layer}_languages.geojson")
+    try:
+        csv_path = cached_download(csv_url, f"glottography_{layer}_languages.csv")
+    except Exception as exc:  # enrichment is optional -- don't fail the load
+        warnings.warn(f"Glottography {layer} languages.csv unavailable ({exc}); "
+                      "proceeding from GeoJSON only.")
+        csv_path = None
+
+    g = gg.language_areas(layer, geojson_path, csv_path)
+    if g.empty:
+        raise RuntimeError(
+            f"Glottography {layer} parsed to zero usable language-area features."
+        )
+
+    df = pd.DataFrame(
+        {
+            "source_id": g["glottocode"].astype(str),
+            "name_raw": g["name"],
+            "geom_kind": "territory_polygon",
+            "glottocode": g["glottocode"].astype(str),  # critical join key
+            "period_from": gg.PERIOD_FROM,
+            "period_to": gg.PERIOD_TO,
+        }
+    )
+    df["name"] = df["name_raw"].map(schema.norm_name)
+    df["area_sqkm"] = g.to_crs(6933).area.values / 1e6  # EPSG:6933 = equal-area
+    df["source_attrs"] = schema.jsonify_attrs(
+        g.assign(glottography_layer=layer), ["family", "maps", "glottography_layer"]
+    )
+    # Clip to the African landmass (Glottography is global -> drop non-African areas).
+    return clip_africa_landmass(schema.finalize_groups(df, g.geometry, "glottography"))
+
+
+# ---------------------------------------------------------------------------
 # 6. Joshua Project (OPTIONAL)  -- contemporary people-group points.
 #    API needs a free key (api_key query param). Field names per JP docs;
 #    ROL3 == ISO 639-3. Best-effort: returns None on any failure.

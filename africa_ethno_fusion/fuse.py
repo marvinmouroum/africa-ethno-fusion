@@ -10,7 +10,7 @@ import pandas as pd
 from . import crosswalk, entity, schema, sources
 
 # Open, auto-downloadable sources built by default.
-DEFAULT_SOURCES = ["murdock_map", "greg", "geoepr", "dplace_ea", "glottolog"]
+DEFAULT_SOURCES = ["murdock_map", "greg", "geoepr", "dplace_ea", "glottolog", "glottography"]
 
 
 def build(
@@ -41,6 +41,8 @@ def build(
                 group_frames.append(sources.load_geoepr())
             elif src == "glottolog":
                 group_frames.append(sources.load_glottolog())
+            elif src == "glottography":
+                group_frames.append(sources.load_glottography())
             elif src == "dplace_ea":
                 g, traits = sources.load_dplace_ea(african_only=african_only)
                 group_frames.append(g)
