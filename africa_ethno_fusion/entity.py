@@ -30,12 +30,43 @@ from shapely import wkt as shapely_wkt
 
 EXACT_METHODS = ["ea_society_id", "glottocode", "iso639_3"]
 POLYGON_SOURCES = ["murdock_map", "greg", "geoepr"]
-# sources matched by NAME: the code-less polygons + D-PLACE (clean ethnonyms),
-# so a territory can attach to a coded entity when the EA-code bridge is missing.
-# Glottolog is excluded -- its labels are language names, riskier for name joins.
-NAME_MATCH_SOURCES = ["murdock_map", "greg", "geoepr", "dplace_ea"]
+# sources matched by NAME. The code-less polygons (murdock/greg/geoepr) carry no
+# language codes and split off into a "territory cluster" whenever the EA-code
+# bridge is missing; D-PLACE/Glottolog/Joshua Project carry codes. Including the
+# coded sources here lets a code-less territory ATTACH (by ethnonym) to the coded
+# entity for the same group -- closing the Hausa / Beja split.
+#
+# Glottolog labels are LANGUAGE names ("Amharic" not the ethnonym "Amhara") and
+# are noisier; it is included because empirically it does not over-merge here
+# (the code-conflict guard + literal-first ordering keep it precise), and it
+# supplies the unambiguous full-literal bridge for cases like Beja where Joshua
+# Project only carries qualified names.
+NAME_MATCH_SOURCES = ["murdock_map", "greg", "geoepr", "dplace_ea", "glottolog", "joshua_project"]
+# sources that carry authoritative language/society codes; their NAMES are only
+# trusted as an exact-name bridge when the qualifier-stripped key is unambiguous.
+CODED_SOURCES = ["dplace_ea", "glottolog", "joshua_project"]
 # preferred_name is taken from the highest-priority source present in a cluster
 NAME_PRIORITY = ["dplace_ea", "glottolog", "murdock_map", "joshua_project", "geoepr", "greg"]
+
+
+def _match_key(name) -> str | None:
+    """Match-only normalization of a group name (the STORED name is never
+    changed -- this key is used solely to decide whether two names match).
+
+    Joshua Project people-group labels carry a trailing qualifier after a comma
+    ("Hausa, Yerwa", "Beja, Amarar", "Amhara, Wollo"); the ethnonym is the head
+    before the first comma. We lower-case and take that head so "Hausa, X" keys
+    to the same value as the bare "Hausa" territory polygon. Parenthetical
+    qualifiers ("Fur (Sudan)") are stripped too. The full string is kept when
+    there is no comma so multi-word ethnonyms ("Hausa-Fulani ...") are untouched.
+    """
+    if not isinstance(name, str):
+        return None
+    s = name.split("(", 1)[0]          # drop "(Sudan)"-style parentheticals
+    s = s.split(",", 1)[0]             # head before the first comma qualifier
+    s = " ".join(s.split()).strip().lower()
+    return s or None
+
 
 # key Ethnographic Atlas traits surfaced onto the canonical row
 TRAIT_VARS = {
@@ -84,7 +115,13 @@ class UnionFind:
 
 def _fuzzy_candidates(groups, recall=0.85):
     """Top-1 fuzzy name matches (both directions) between name-matched sources,
-    annotated with score and whether the match is reciprocal."""
+    annotated with score and whether the match is reciprocal.
+
+    Matching is done on the qualifier-stripped `_match_key` (so "Hausa, Maouri"
+    matches the bare "Hausa" territory), but the original names are reported.
+    `literal` flags pairs whose RAW names are identical -- those are unambiguous
+    ethnonym hits and are processed before qualifier-stripped exact-name hits so
+    a territory attaches to the right coded cluster first."""
     try:
         from rapidfuzz import fuzz, process
     except ImportError:
@@ -93,32 +130,61 @@ def _fuzzy_candidates(groups, recall=0.85):
     present = [s for s in NAME_MATCH_SOURCES if (groups["source"] == s).any()]
     cand = []
     for sa, sb in itertools.combinations(present, 2):
-        A = groups[(groups["source"] == sa) & groups["name"].notna()]
-        B = groups[(groups["source"] == sb) & groups["name"].notna()]
+        A = groups[(groups["source"] == sa) & groups["name"].notna()].copy()
+        B = groups[(groups["source"] == sb) & groups["name"].notna()].copy()
+        A["_k"] = A["name"].map(_match_key)
+        B["_k"] = B["name"].map(_match_key)
+        A = A[A["_k"].notna()]
+        B = B[B["_k"].notna()]
         if A.empty or B.empty:
             continue
         na, nb = A["name"].tolist(), B["name"].tolist()
+        ka, kb = A["_k"].tolist(), B["_k"].tolist()
         ida, idb = A["record_id"].tolist(), B["record_id"].tolist()
-        M = process.cdist(na, nb, scorer=fuzz.token_sort_ratio)
+        M = process.cdist(ka, kb, scorer=fuzz.token_sort_ratio)  # compare on keys
         best_b = M.argmax(axis=1)
         best_a = M.argmax(axis=0)
         seen = set()
-        for i, j in enumerate(best_b):
+
+        def _emit(i, j, reciprocal):
             s = float(M[i, j]) / 100
-            if s >= recall:
-                cand.append({"a": ida[i], "b": idb[j], "score": round(s, 3),
-                             "name_a": na[i], "name_b": nb[j],
-                             "reciprocal": bool(best_a[j] == i)})
-                seen.add((i, j))
+            if s < recall:
+                return
+            cand.append({"a": ida[i], "b": idb[j], "score": round(s, 3),
+                         "name_a": na[i], "name_b": nb[j],
+                         "reciprocal": bool(reciprocal),
+                         "literal": na[i] == nb[j]})
+
+        for i, j in enumerate(best_b):
+            _emit(i, j, best_a[j] == i)
+            seen.add((i, j))
         for j, i in enumerate(best_a):  # reverse direction, avoid dupes
             if (i, j) in seen:
                 continue
-            s = float(M[i, j]) / 100
-            if s >= recall:
-                cand.append({"a": ida[i], "b": idb[j], "score": round(s, 3),
-                             "name_a": na[i], "name_b": nb[j],
-                             "reciprocal": bool(best_b[i] == j)})
+            _emit(i, j, best_b[i] == j)
     return cand
+
+
+def _ambiguous_match_keys(groups):
+    """Match keys that, within the coded sources, point at MORE THAN ONE distinct
+    authoritative code (glottocode or iso639_3). Joshua Project re-uses one head
+    ethnonym across unrelated languages ("Beja, Amarar"=bej vs "Beja, Beni Amer"
+    =tig; "Daza"=dzg vs hau), so such a key is NOT a safe exact-name bridge for a
+    code-less territory -- it could attach to the wrong language. We let these
+    fall to review unless a LITERAL full-name hit already pinned the right code.
+    """
+    by_key = {}
+    coded = groups[groups["source"].isin(CODED_SOURCES)]
+    for nm, glo, iso in coded[["name", "glottocode", "iso639_3"]].itertuples(index=False):
+        k = _match_key(nm)
+        if not k:
+            continue
+        d = by_key.setdefault(k, set())
+        if isinstance(glo, str) and glo:
+            d.add(("g", glo))
+        if isinstance(iso, str) and iso:
+            d.add(("i", iso))
+    return {k for k, codes in by_key.items() if len(codes) > 1}
 
 
 def _root_code_sets(groups, uf):
@@ -169,9 +235,15 @@ def resolve_entities(groups, links, traits=None, *, fuzzy_merge=0.92, fuzzy_reca
     # singleton rule (attach a lone territory, never fuse two built entities).
     code_sets = _root_code_sets(groups, uf)  # root -> {"glotto": set, "ea": set}
     cand = _fuzzy_candidates(groups, recall=fuzzy_recall)
+    ambiguous = _ambiguous_match_keys(groups)  # match keys with >1 coded meaning
     name_scores = {}   # root -> min score of name edges used
     review = []
-    for c in sorted(cand, key=lambda x: -x["score"]):
+    # Process LITERAL exact-name hits before qualifier-stripped exact-name hits
+    # (both score ~1.0): a bare ethnonym match pins a code-less territory to the
+    # correct coded cluster first, so any later ambiguous stripped edge to a
+    # different language is then caught by the code-conflict guard.
+    cand.sort(key=lambda x: (-x["score"], not x.get("literal", False)))
+    for c in cand:
         a, b, s = c["a"], c["b"], c["score"]
         if a not in uf.parent or b not in uf.parent:
             continue
@@ -182,6 +254,11 @@ def resolve_entities(groups, links, traits=None, *, fuzzy_merge=0.92, fuzzy_reca
         if exact_name:
             if _code_conflict(code_sets, ra, rb):
                 review.append({**c, "decision": "name_code_conflict"})
+                continue
+            # A qualifier-stripped (non-literal) exact-name hit whose head is
+            # ambiguous across coded sources is NOT a safe bridge -- defer it.
+            if not c.get("literal", False) and _match_key(c["name_a"]) in ambiguous:
+                review.append({**c, "decision": "ambiguous_stripped_name"})
                 continue
             root = uf.union(a, b)
             _merge_code_sets(code_sets, root, ra, rb)
