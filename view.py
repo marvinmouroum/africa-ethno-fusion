@@ -185,22 +185,40 @@ _CSS = """
   padding:2px 3px;border-radius:3px}
 #afef-legend .row:hover{background:#f0f0f0}
 #afef-legend .row.on{background:#fde7ea;font-weight:600}
+#afef-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#afef-legend-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#afef-min,#afef-legend-min{border:0;background:#f0f0f0;border-radius:5px;cursor:pointer;
+  font-size:14px;line-height:1;color:#444;padding:3px 8px;flex:none}
+#afef-panel.min #afef-body{display:none}
+#afef-panel.min{width:auto}
+#afef-panel.min h3{margin:0}
+@media (max-width:640px){
+  #afef-panel{width:60vw;max-width:230px;padding:9px 10px}
+  #afef-panel h3{font-size:13px}
+  #afef-legend{max-width:42vw;font-size:10px}
+  #afef-legend-list{max-height:30vh}
+}
 </style>
 """
 
 _PANEL = """
 <div id="afef-panel">
-  <h3>Ethnicities of Africa</h3>
-  <div class="sub" id="afef-modesub">Each region coloured by its most common ethnicity</div>
-  <div class="afef-modes">
-    <button data-m="1" class="on">1st</button>
-    <button data-m="2">2nd</button>
-    <button data-m="3">3rd</button>
+  <div id="afef-head">
+    <h3>Ethnicities of Africa</h3>
+    <button id="afef-min" title="Hide controls">▾</button>
   </div>
-  <input id="afef-q" type="text" autocomplete="off" spellcheck="false"
-         placeholder="Find one ethnicity → see where they live" />
-  <ul id="afef-res"></ul>
-  <button id="afef-clear">✕ clear — show dominance map</button>
+  <div id="afef-body">
+    <div class="sub" id="afef-modesub">Each region coloured by its most common ethnicity</div>
+    <div class="afef-modes">
+      <button data-m="1" class="on">1st</button>
+      <button data-m="2">2nd</button>
+      <button data-m="3">3rd</button>
+    </div>
+    <input id="afef-q" type="text" autocomplete="off" spellcheck="false"
+           placeholder="Find one ethnicity → see where they live" />
+    <ul id="afef-res"></ul>
+    <button id="afef-clear">✕ clear — show dominance map</button>
+  </div>
 </div>
 <div id="afef-legend"></div>
 """
@@ -214,6 +232,14 @@ _JS = """
     var map=__MAP__, DATA=window.AFEF.data, ETHNO=window.AFEF.ethno;
     var mode=1, selected=null, layers={}, hi=null;
     var EMPTY="#e9e9e9";
+    // collapse controls on small screens so they don't block the map
+    var mobile=window.matchMedia("(max-width:640px)").matches;
+    var panelOpen=!mobile, legendOpen=!mobile;
+    var panelEl=document.getElementById("afef-panel");
+    function applyPanel(){ panelEl.classList.toggle("min",!panelOpen);
+      document.getElementById("afef-min").textContent=panelOpen?"▾":"▸"; }
+    document.getElementById("afef-min").onclick=function(){ panelOpen=!panelOpen; applyPanel(); };
+    applyPanel();
     function fmt(n){ return (n&&n>0)? Number(n).toLocaleString() : ""; }
     var RANKW={1:"most common",2:"2nd most common",3:"3rd most common"};
 
@@ -304,22 +330,29 @@ _JS = """
       var arr=DATA[String(mode)].features.map(function(f){return [f.properties.name,f.properties.area||0];})
                 .sort(function(a,b){return b[1]-a[1];});
       var el=document.getElementById("afef-legend"); el.innerHTML="";
-      var head=document.createElement("div");
-      head.innerHTML="<b>Groups · rank "+mode+"</b> <span style='color:#999'>("+arr.length+")</span>"+
-        "<div style='color:#999;font-size:10px'>scroll · click a group to locate it</div>";
+      var head=document.createElement("div"); head.id="afef-legend-head";
+      head.innerHTML="<b>Groups · rank "+mode+" <span style='color:#999;font-weight:400'>("+arr.length+
+        ")</span></b><button id='afef-legend-min' title='Hide list'>"+(legendOpen?"▾":"▸")+"</button>";
       el.appendChild(head);
-      var list=document.createElement("div"); list.id="afef-legend-list";
-      arr.forEach(function(r){
-        var row=document.createElement("div");
-        row.className="row"+(r[0]===selected?" on":"");
-        var sw=document.createElement("span"); sw.className="afef-sw";
-        sw.style.background=(ETHNO[r[0]]||{}).color;
-        var nm=document.createElement("span"); nm.textContent=r[0];
-        row.appendChild(sw); row.appendChild(nm);
-        row.onmousedown=function(ev){ ev.preventDefault(); pick(r[0]); };
-        list.appendChild(row);
-      });
-      el.appendChild(list);
+      if(legendOpen){
+        var hint=document.createElement("div");
+        hint.style.cssText="color:#999;font-size:10px";
+        hint.textContent="scroll · click a group to locate it";
+        el.appendChild(hint);
+        var list=document.createElement("div"); list.id="afef-legend-list";
+        arr.forEach(function(r){
+          var row=document.createElement("div");
+          row.className="row"+(r[0]===selected?" on":"");
+          var sw=document.createElement("span"); sw.className="afef-sw";
+          sw.style.background=(ETHNO[r[0]]||{}).color;
+          var nm=document.createElement("span"); nm.textContent=r[0];
+          row.appendChild(sw); row.appendChild(nm);
+          row.onmousedown=function(ev){ ev.preventDefault(); pick(r[0]); };
+          list.appendChild(row);
+        });
+        el.appendChild(list);
+      }
+      document.getElementById("afef-legend-min").onclick=function(){ legendOpen=!legendOpen; legend(); };
     }
 
     if(L&&L.DomEvent){
