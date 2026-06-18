@@ -89,6 +89,21 @@ canonical[canonical.preferred_name == "Kikuyu"]
 Pass `--no-resolve` (or `resolve=False`) to skip entity resolution and emit only
 the raw `groups`/`traits`/`links` star schema.
 
+Joshua Project needs a free API key (`--jp-api-key KEY`); the other six sources
+download without credentials and are built by default.
+
+## See the results
+
+Two self-contained HTML views (build first, then run):
+
+```bash
+python view.py      # -> out/map.html    interactive map; the canonical layer is
+                    #                    the centerpiece (colored by corroboration),
+                    #                    with a name search box; raw sources toggle on
+python review.py    # -> out/review.html sortable sheet of the needs_review entities
+                    #                    + the rejected name-match candidates
+```
+
 ## What it enables
 
 * **Point → identity.** Given a (lat, lon), find the ethnic territory it falls in,

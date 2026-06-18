@@ -331,16 +331,23 @@ def _union_geom(members, source):
 
 def _build_entity(cid, members, trait_map, fuzzy_min):
     sources = sorted(members["source"].unique().tolist())
-    # preferred name by source priority
-    pref = None
-    for src in NAME_PRIORITY:
-        hit = members[(members["source"] == src) & members["name"].notna()]
-        if not hit.empty:
-            pref = hit.iloc[0]["name"]
-            break
-    if pref is None:
-        nm = members["name"].dropna()
-        pref = nm.iloc[0] if not nm.empty else cid
+    # preferred name: the MOST COMMON member name (so the recognizable ethnonym
+    # wins over a single source's technical label, e.g. "Hausa" not the EA
+    # society's "Zazzagawa Hausa"). Ties broken by source priority, then by the
+    # shorter name.
+    named = members.dropna(subset=["name"])
+    pref = cid
+    if not named.empty:
+        counts = named["name"].value_counts()
+        top = counts[counts == counts.max()].index.tolist()
+        if len(top) == 1:
+            pref = top[0]
+        else:
+            pri = {s: i for i, s in enumerate(NAME_PRIORITY)}
+            cand = named[named["name"].isin(top)].copy()
+            cand["_pri"] = cand["source"].map(lambda s: pri.get(s, 99))
+            cand["_len"] = cand["name"].str.len()
+            pref = cand.sort_values(["_pri", "_len"]).iloc[0]["name"]
     alt = sorted({n for n in members["name"].dropna().tolist() if n != pref})
 
     glotto = _mode(members["glottocode"])
