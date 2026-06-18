@@ -97,19 +97,22 @@ download without credentials and are built by default.
 Two self-contained HTML views (build first, then run):
 
 ```bash
-python view.py      # -> out/map.html    "Ethnicities of Africa" explorer: the
-                    #                    continent is tiled into cells, each coloured
-                    #                    by the MOST COMMON ethnicity there. Buttons
-                    #                    switch to the 2nd/3rd most common; a selector
-                    #                    highlights everywhere one ethnicity appears.
+python view.py      # -> out/map.html    "Ethnicities of Africa" explorer: Africa is
+                    #                    partitioned into organic bordered polygons
+                    #                    (conventional-map style) coloured by the MOST
+                    #                    COMMON ethnicity. Buttons switch to the 2nd/3rd
+                    #                    most common; a selector highlights every region
+                    #                    where one ethnicity appears.
 python review.py    # -> out/review.html sortable sheet of the needs_review entities
                     #                    + the rejected name-match candidates
 ```
 
-The explorer ranks, per cell, the canonical groups whose territory covers the cell
-centre — by **population** (territory area breaks ties). "Territory" prefers the
-historical homeland (Murdock) → modern settlement (GeoEPR) → language-speaker area
-(Glottography). Ranking metric and cell size (`STEP`) are easy to tune in `view.py`.
+How the partition is built: a fine grid ranks, per cell, the canonical groups whose
+territory covers the cell centre — by **population** (territory area breaks ties) —
+then adjacent same-group cells are dissolved + smoothed into organic bordered
+polygons. "Territory" prefers the historical homeland (Murdock) → modern settlement
+(GeoEPR) → language-speaker area (Glottography). Grid resolution (`STEP`) and border
+smoothing (`SMOOTH`/`SIMP`) are easy to tune in `view.py`.
 
 ## What it enables
 

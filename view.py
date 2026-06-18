@@ -1,48 +1,65 @@
 #!/usr/bin/env python3
-"""Build an interactive 'dominant ethnicity' explorer for Africa -> out/map.html.
+"""Build the "Ethnicities of Africa" explorer -> out/map.html.
 
-Africa is tiled into a grid. For each cell we rank the canonical ethnic groups
-whose territory covers the cell centre, by population (territory area breaks
-ties / fills gaps). The map colours each cell by its #1 group; UI buttons switch
-the colouring to the 2nd / 3rd most common group; and a selector highlights every
-cell where one chosen ethnicity appears.
+Africa is partitioned into organic territory polygons (conventional-map style,
+like country borders) coloured by the DOMINANT ethnicity. Under the hood we rank
+groups on a fine grid (by population; territory area breaks ties), then dissolve
+adjacent same-group cells into smooth bordered polygons. UI: buttons recolour by
+the 1st / 2nd / 3rd most common group per region; a selector highlights every
+region where one chosen ethnicity appears.
 
 Run: python view.py   (after building out/canonical.parquet)
 """
 import hashlib
 import json
+import warnings
 
 import folium
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from shapely.geometry import box
+from shapely.geometry import Point, box, mapping
+
+warnings.filterwarnings("ignore", message=".*geographic CRS.*")
 
 OUT = "out"
-STEP = 0.7  # grid cell size in degrees (~78 km). Smaller = finer + bigger file.
+STEP = 0.25     # dominance grid cell (deg, ~28 km). Finer = smoother borders, bigger file.
+SMOOTH = 0.18   # buffer round-trip (deg) to round the stair-stepped grid edges.
+SIMP = 0.06     # vertex simplification tolerance (deg).
+NDIG = 2        # coordinate rounding in the output GeoJSON.
 
 
 def color_for(name):
-    """Deterministic, well-spread colour per ethnicity name (CSS hsl string)."""
     if not name:
         return None
     h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
-    hue = h % 360
-    sat = 58 + (h // 360) % 30        # 58–88
-    lig = 45 + (h // 11000) % 18      # 45–63
-    return f"hsl({hue},{sat}%,{lig}%)"
+    return f"hsl({h % 360},{58 + (h // 360) % 30}%,{45 + (h // 11000) % 18}%)"
+
+
+def _round_geom(g):
+    m = mapping(g)
+
+    def rc(c):
+        if isinstance(c, (list, tuple)):
+            if c and isinstance(c[0], (int, float)):
+                return [round(c[0], NDIG), round(c[1], NDIG)]
+            return [rc(x) for x in c]
+        return c
+
+    m["coordinates"] = rc(m["coordinates"])
+    return m
 
 
 def main():
     c = gpd.read_parquet(f"{OUT}/canonical.parquet")
     poly = c[c.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
-    poly["geometry"] = poly.geometry.buffer(0)  # repair invalid
+    poly["geometry"] = poly.geometry.buffer(0)
     poly = poly[~poly.geometry.is_empty & poly.geometry.notna()]
     poly["pop"] = pd.to_numeric(poly["population_total"], errors="coerce").fillna(0.0)
     poly["area_"] = pd.to_numeric(poly["area_sqkm"], errors="coerce").fillna(1e12)
-    print(f"{len(poly)} territory entities feed the dominance grid")
+    print(f"{len(poly)} territory entities feed the dominance partition")
 
-    # ---- build the grid (only cells whose centre falls in some territory) ----
+    # ---- fine grid: rank groups per cell by population, area as tiebreak ----
     minx, miny, maxx, maxy = poly.total_bounds
     xs = np.arange(np.floor(minx), np.ceil(maxx), STEP)
     ys = np.arange(np.floor(miny), np.ceil(maxy), STEP)
@@ -53,43 +70,30 @@ def main():
             cells.append(box(x, y, x + STEP, y + STEP))
             cellxy[k] = (float(x), float(y))
             k += 1
-    grid = gpd.GeoDataFrame({"cell_id": list(range(k))}, geometry=cells, crs=4326)
-    # cell centres computed directly from the box origin (avoids the geographic-CRS
-    # centroid warning and is exact for axis-aligned boxes).
-    from shapely.geometry import Point
+    grid = gpd.GeoDataFrame({"cell_id": range(k)}, geometry=cells, crs=4326)
     cent = gpd.GeoDataFrame(
-        {"cell_id": list(range(k))},
+        {"cell_id": range(k)},
         geometry=[Point(cellxy[i][0] + STEP / 2, cellxy[i][1] + STEP / 2) for i in range(k)],
         crs=4326,
     )
-
-    # ---- rank ethnicities per cell: population desc, then smaller territory ----
-    j = gpd.sjoin(
-        cent[["cell_id", "geometry"]],
-        poly[["preferred_name", "pop", "area_", "geometry"]],
-        predicate="within",
-    )
-    j = j.dropna(subset=["preferred_name"])
-    j = j.sort_values(["cell_id", "pop", "area_"], ascending=[True, False, True])
+    j = gpd.sjoin(cent[["cell_id", "geometry"]],
+                  poly[["preferred_name", "pop", "area_", "geometry"]], predicate="within")
+    j = j.dropna(subset=["preferred_name"]).sort_values(
+        ["cell_id", "pop", "area_"], ascending=[True, False, True])
     j = j.drop_duplicates(["cell_id", "preferred_name"])
     j["rank"] = j.groupby("cell_id").cumcount() + 1
-    top = j[j["rank"] <= 3]
+    j = j[j["rank"] <= 3]
 
-    cellinfo = {}
-    for cid, name, pop, rank in top[["cell_id", "preferred_name", "pop", "rank"]].itertuples(index=False):
-        d = cellinfo.setdefault(int(cid), {})
-        d[f"r{rank}"] = name
-        d[f"p{rank}"] = int(pop) if pop and pop > 0 else 0
-    print(f"{len(cellinfo)} populated grid cells")
+    cellrank = {1: {}, 2: {}, 3: {}}
+    for cid, name, rank in j[["cell_id", "preferred_name", "rank"]].itertuples(index=False):
+        cellrank[rank][int(cid)] = name
+    print(f"{len(cellrank[1])} populated cells")
 
-    # ---- per-name bbox (for the 'find this ethnicity' zoom) ----
-    names_all = {d[f"r{r}"] for d in cellinfo.values() for r in (1, 2, 3) if d.get(f"r{r}")}
-    bounds = poly.groupby("preferred_name").agg(
-        minx=("geometry", lambda g: g.total_bounds[0]),
-        miny=("geometry", lambda g: g.total_bounds[1]),
-        maxx=("geometry", lambda g: g.total_bounds[2]),
-        maxy=("geometry", lambda g: g.total_bounds[3]),
-    )
+    # ---- per-name attributes (representative canonical row = max population) ----
+    names_all = {n for r in cellrank.values() for n in r.values()}
+    rep = (poly.sort_values("pop", ascending=False)
+               .drop_duplicates("preferred_name").set_index("preferred_name"))
+    bounds = poly.dissolve(by="preferred_name").geometry.bounds  # minx/miny/maxx/maxy
     ethno = {}
     for nm in sorted(names_all):
         col = color_for(nm)
@@ -97,43 +101,55 @@ def main():
         if nm in bounds.index:
             b = bounds.loc[nm]
             bbox = [[float(b.miny), float(b.minx)], [float(b.maxy), float(b.maxx)]]
-        ethno[nm] = {"color": col, "bbox": bbox}
+        r = rep.loc[nm] if nm in rep.index else None
+        ethno[nm] = {
+            "color": col,
+            "bbox": bbox,
+            "pop": int(r["pop"]) if (r is not None and r["pop"] > 0) else None,
+            "family": (None if r is None or pd.isna(r.get("language_family")) else r.get("language_family")),
+        }
 
-    # ---- grid GeoJSON ----
-    def ring(x, y, s):
-        return [[round(x, 3), round(y, 3)], [round(x + s, 3), round(y, 3)],
-                [round(x + s, 3), round(y + s, 3)], [round(x, 3), round(y + s, 3)],
-                [round(x, 3), round(y, 3)]]
+    # ---- dissolve same-group cells into organic bordered polygons, per rank ----
+    gidx = grid.set_index("cell_id")
 
-    feats = []
-    for cid, d in cellinfo.items():
-        x, y = cellxy[cid]
-        props = {}
-        for r in (1, 2, 3):
-            nm = d.get(f"r{r}")
-            props[f"r{r}"] = nm
-            props[f"p{r}"] = d.get(f"p{r}", 0)
-            props[f"c{r}"] = color_for(nm) if nm else None
-        feats.append({"type": "Feature", "properties": props,
-                      "geometry": {"type": "Polygon", "coordinates": [ring(x, y, STEP)]}})
-    grid_geojson = {"type": "FeatureCollection", "features": feats}
+    def dissolve_rank(r):
+        items = cellrank[r]
+        if not items:
+            return {"type": "FeatureCollection", "features": []}
+        gdf = gidx.loc[list(items)].copy()
+        gdf["name"] = list(items.values())
+        gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=4326)
+        dis = gdf.dissolve(by="name")
+        # round the stair-stepped grid edges into organic borders
+        dis["geometry"] = dis.geometry.buffer(SMOOTH).buffer(-SMOOTH).simplify(SIMP)
+        dis = dis[~dis.geometry.is_empty & dis.geometry.notna()]
+        areas = dis.to_crs(6933).area / 1e6
+        feats = []
+        for nm, row in dis.iterrows():
+            g = row.geometry
+            if g is None or g.is_empty:
+                continue
+            feats.append({"type": "Feature",
+                          "properties": {"name": nm, "area": int(areas.loc[nm])},
+                          "geometry": _round_geom(g)})
+        return {"type": "FeatureCollection", "features": feats}
+
+    data = {str(r): dissolve_rank(r) for r in (1, 2, 3)}
+    print("dissolved polygons per rank:", {r: len(fc["features"]) for r, fc in data.items()})
 
     # ---- assemble map ----
     m = folium.Map(location=[2.5, 19], zoom_start=4, tiles="CartoDB positron",
                    control_scale=True)
     map_var = m.get_name()
-    payload = (
-        "<script>window.AFEF=" +
-        json.dumps({"grid": grid_geojson, "ethno": ethno}, ensure_ascii=False) +
-        ";</script>"
-    )
+    payload = ("<script>window.AFEF=" +
+               json.dumps({"data": data, "ethno": ethno}, ensure_ascii=False) +
+               ";</script>")
     m.get_root().html.add_child(folium.Element(payload))
     m.get_root().header.add_child(folium.Element(_CSS))
     m.get_root().html.add_child(folium.Element(_PANEL))
     m.get_root().html.add_child(folium.Element(_JS.replace("__MAP__", map_var)))
-
     m.save(f"{OUT}/map.html")
-    print(f"wrote {OUT}/map.html  ({len(feats)} cells, {len(ethno)} ethnicities)")
+    print(f"wrote {OUT}/map.html  ({len(ethno)} ethnicities)")
 
 
 _CSS = """
@@ -162,14 +178,13 @@ _CSS = """
   box-shadow:0 1px 8px rgba(0,0,0,.3);max-width:230px}
 #afef-legend b{font-size:12px}
 #afef-legend .row{display:flex;align-items:center;gap:6px;margin-top:3px}
-.afef-tip b{color:#111}
 </style>
 """
 
 _PANEL = """
 <div id="afef-panel">
   <h3>Ethnicities of Africa</h3>
-  <div class="sub" id="afef-modesub">Colour = most common group in each cell</div>
+  <div class="sub" id="afef-modesub">Each region coloured by its most common ethnicity</div>
   <div class="afef-modes">
     <button data-m="1" class="on">1st</button>
     <button data-m="2">2nd</button>
@@ -178,7 +193,7 @@ _PANEL = """
   <input id="afef-q" type="text" autocomplete="off" spellcheck="false"
          placeholder="Find one ethnicity → see where they live" />
   <ul id="afef-res"></ul>
-  <button id="afef-clear">✕ clear selection — show dominance map</button>
+  <button id="afef-clear">✕ clear — show dominance map</button>
 </div>
 <div id="afef-legend"></div>
 """
@@ -189,118 +204,106 @@ _JS = """
   function ready(fn){ if(typeof __MAP__!=="undefined" && window.AFEF){fn();}
                       else {setTimeout(function(){ready(fn);},60);} }
   ready(function(){
-    var map=__MAP__, GRID=window.AFEF.grid, ETHNO=window.AFEF.ethno;
-    var mode=1, selected=null, marker=null;
+    var map=__MAP__, DATA=window.AFEF.data, ETHNO=window.AFEF.ethno;
+    var mode=1, selected=null, layers={}, hi=null;
     var EMPTY="#e9e9e9";
-
     function fmt(n){ return (n&&n>0)? Number(n).toLocaleString() : ""; }
+    var RANKW={1:"most common",2:"2nd most common",3:"3rd most common"};
 
-    function cellStyle(f){
-      var p=f.properties, fill=EMPTY, op=0.06, line=0.1, lc="#fff";
-      if(selected){
-        var present=[p.r1,p.r2,p.r3].indexOf(selected);
-        if(present>=0){ fill=(ETHNO[selected]||{}).color||"#d7263d"; op=0.85;
-                        line=0.6; lc="#7a0010"; }
-        else { fill=EMPTY; op=0.05; }
-      } else {
-        var col=p["c"+mode];
-        if(col){ fill=col; op=0.72; } else { fill=EMPTY; op=0.05; }
-      }
-      return {fillColor:fill,color:lc,weight:line,fillOpacity:op};
+    function baseStyle(f){
+      var nm=f.properties.name, col=(ETHNO[nm]||{}).color||EMPTY;
+      var dim = selected && nm!==selected;
+      return {fillColor:col,color:"#ffffff",weight:0.7,
+              fillOpacity: dim?0.10:0.80};
     }
-
-    function tip(p){
-      var rows=[["1st",p.r1,p.p1],["2nd",p.r2,p.p2],["3rd",p.r3,p.p3]];
-      var h="<div class='afef-tip'>";
-      rows.forEach(function(r){
-        if(r[1]){ var hl=(selected&&r[1]===selected)?";color:#d7263d":"";
-          h+="<div style='font-size:11px"+hl+"'>"+r[0]+": <b>"+r[1]+"</b>"+
-             (r[2]?" · "+fmt(r[2]):"")+"</div>"; }
-      });
-      return h+"</div>";
+    function tip(nm){
+      var e=ETHNO[nm]||{}, h="<b>"+nm+"</b><br><span style='color:#666'>"+RANKW[mode]+" here</span>";
+      if(e.pop) h+="<br>population ≈ "+fmt(e.pop);
+      if(e.family) h+="<br>family: "+e.family;
+      return h;
     }
+    function mk(r){ return L.geoJSON(DATA[String(r)],{style:baseStyle,
+      onEachFeature:function(f,l){ l.bindTooltip(tip(f.properties.name),{sticky:true});
+        l.on("click",function(){ pick(f.properties.name); }); }}); }
+    for(var r=1;r<=3;r++) layers[r]=mk(r);
+    layers[1].addTo(map);
 
-    var layer=L.geoJSON(GRID,{style:cellStyle,
-      onEachFeature:function(f,l){ l.bindTooltip(tip(f.properties),{sticky:true}); }
-    }).addTo(map);
-    function restyle(){ layer.setStyle(cellStyle);
-      layer.eachLayer(function(l){ l.setTooltipContent(tip(l.feature.properties)); }); }
-
-    // ---- mode buttons ----
+    function setMode(n){
+      map.removeLayer(layers[mode]); mode=n; layers[mode].addTo(map);
+      if(selected){ layers[mode].setStyle(baseStyle); buildHi(); }
+      legend();
+      layers[mode].eachLayer(function(l){ l.setTooltipContent(tip(l.feature.properties.name)); });
+    }
     var sub=document.getElementById("afef-modesub");
-    var SUBT={1:"Colour = most common group in each cell",
-              2:"Colour = 2nd most common group",
-              3:"Colour = 3rd most common group"};
     document.querySelectorAll(".afef-modes button").forEach(function(b){
       b.onclick=function(){
         document.querySelectorAll(".afef-modes button").forEach(function(x){x.classList.remove("on");});
-        b.classList.add("on"); mode=+b.dataset.m; sub.textContent=SUBT[mode];
-        clearSel(); restyle(); legend();
+        b.classList.add("on"); setMode(+b.dataset.m);
+        if(!selected) sub.textContent="Each region coloured by its "+RANKW[+b.dataset.m]+" ethnicity";
       };
     });
 
-    // ---- legend: top dominant groups for current mode ----
-    function legend(){
-      var counts={};
-      GRID.features.forEach(function(f){ var n=f.properties["r"+mode];
-        if(n) counts[n]=(counts[n]||0)+1; });
-      var arr=Object.keys(counts).map(function(n){return [n,counts[n]];})
-                .sort(function(a,b){return b[1]-a[1];}).slice(0,12);
-      var h="<b>Top groups (rank "+mode+")</b>";
-      arr.forEach(function(r){
-        h+="<div class='row'><span class='afef-sw' style='background:"+
-           (ETHNO[r[0]]||{}).color+"'></span>"+r[0]+" <span style='color:#999'>("+r[1]+")</span></div>";
-      });
-      document.getElementById("afef-legend").innerHTML=h;
-    }
-
-    // ---- selector: find one ethnicity, highlight where it lives ----
+    // ---- selector: highlight EVERY region where a group appears (any rank) ----
     var q=document.getElementById("afef-q"), ul=document.getElementById("afef-res");
     var clearBtn=document.getElementById("afef-clear");
     var NAMES=Object.keys(ETHNO).sort();
 
-    function clearSel(){ selected=null; if(marker){map.removeLayer(marker);marker=null;}
-      clearBtn.style.display="none"; ul.style.display="none"; }
-    clearBtn.onclick=function(){ clearSel(); q.value=""; restyle(); legend(); };
+    function buildHi(){
+      if(hi){ map.removeLayer(hi); hi=null; }
+      if(!selected) return;
+      var feats=[];
+      ["1","2","3"].forEach(function(r){
+        DATA[r].features.forEach(function(f){ if(f.properties.name===selected) feats.push(f); });
+      });
+      hi=L.geoJSON({type:"FeatureCollection",features:feats},{
+        style:{fillColor:(ETHNO[selected]||{}).color||"#d7263d",color:"#7a0010",
+               weight:1.6,fillOpacity:0.88}, interactive:false}).addTo(map);
+    }
+    function clearSel(){ selected=null; if(hi){map.removeLayer(hi);hi=null;}
+      clearBtn.style.display="none"; ul.style.display="none";
+      layers[mode].setStyle(baseStyle);
+      sub.textContent="Each region coloured by its "+RANKW[mode]+" ethnicity"; }
+    clearBtn.onclick=function(){ q.value=""; clearSel(); };
 
     function pick(name){
-      selected=name; ul.style.display="none"; q.value=name;
-      clearBtn.style.display="block";
+      selected=name; q.value=name; ul.style.display="none"; clearBtn.style.display="block";
+      layers[mode].setStyle(baseStyle); buildHi();
       var e=ETHNO[name];
-      if(e&&e.bbox){ map.fitBounds(e.bbox,{maxZoom:7,padding:[30,30]}); }
-      restyle();
-      document.getElementById("afef-modesub").textContent="Showing where "+name+" appear (any rank)";
+      if(e&&e.bbox) map.fitBounds(e.bbox,{maxZoom:7,padding:[30,30]});
+      sub.textContent="Showing where "+name+" appear (any rank)";
     }
-
     function search(){
       var s=q.value.trim().toLowerCase();
       if(!s){ ul.style.display="none"; return; }
-      var starts=[],has=[];
+      var a=[],b=[];
       for(var i=0;i<NAMES.length;i++){ var nm=NAMES[i].toLowerCase();
-        if(nm.indexOf(s)===0) starts.push(NAMES[i]);
-        else if(nm.indexOf(s)>=0) has.push(NAMES[i]);
-        if(starts.length+has.length>120) break; }
-      var all=starts.concat(has).slice(0,40);
-      ul.innerHTML="";
+        if(nm.indexOf(s)===0)a.push(NAMES[i]); else if(nm.indexOf(s)>=0)b.push(NAMES[i]);
+        if(a.length+b.length>120)break; }
+      var all=a.concat(b).slice(0,40); ul.innerHTML="";
       if(!all.length){ ul.style.display="none"; return; }
-      all.forEach(function(n){
-        var li=document.createElement("li");
+      all.forEach(function(n){ var li=document.createElement("li");
         li.innerHTML="<span class='afef-sw' style='background:"+(ETHNO[n]||{}).color+"'></span>"+n;
-        li.onmousedown=function(ev){ ev.preventDefault(); pick(n); };
-        ul.appendChild(li);
-      });
+        li.onmousedown=function(ev){ ev.preventDefault(); pick(n); }; ul.appendChild(li); });
       ul.style.display="block";
     }
     q.addEventListener("input",search);
     q.addEventListener("focus",function(){ if(q.value.trim())search(); });
     q.addEventListener("keydown",function(e){
-      if(e.key==="Enter"){ e.preventDefault();
-        var first=ul.querySelector("li"); if(first){ first.dispatchEvent(new MouseEvent("mousedown")); } }
+      if(e.key==="Enter"){ e.preventDefault(); var f=ul.querySelector("li");
+        if(f)f.dispatchEvent(new MouseEvent("mousedown")); }
       else if(e.key==="Escape"){ ul.style.display="none"; q.blur(); } });
 
-    if(L&&L.DomEvent){ var box=document.getElementById("afef-panel");
-      L.DomEvent.disableClickPropagation(box); L.DomEvent.disableScrollPropagation(box); }
+    function legend(){
+      var arr=DATA[String(mode)].features.map(function(f){return [f.properties.name,f.properties.area||0];})
+                .sort(function(a,b){return b[1]-a[1];}).slice(0,12);
+      var h="<b>Largest territories (rank "+mode+")</b>";
+      arr.forEach(function(r){ h+="<div class='row'><span class='afef-sw' style='background:"+
+        (ETHNO[r[0]]||{}).color+"'></span>"+r[0]+"</div>"; });
+      document.getElementById("afef-legend").innerHTML=h;
+    }
 
+    if(L&&L.DomEvent){ var pnl=document.getElementById("afef-panel");
+      L.DomEvent.disableClickPropagation(pnl); L.DomEvent.disableScrollPropagation(pnl); }
     legend();
   });
 })();
