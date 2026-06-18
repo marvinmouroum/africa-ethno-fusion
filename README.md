@@ -4,6 +4,10 @@ Fuse the major open datasets that map **which ethnic groups live where in Africa
 into one queryable star schema (pandas / GeoPandas), then export to
 GeoParquet, GeoPackage, or CSV.
 
+🗺️ **Live interactive map:** https://marvinmouroum.github.io/africa-ethno-fusion/
+— Africa partitioned into territory polygons coloured by the dominant ethnicity,
+with 1st/2nd/3rd-most-common toggles and a per-ethnicity locator.
+
 ## Why a star schema (and not one big table)
 
 The datasets do **not** share a universal key. They link through a *chain* of
@@ -106,6 +110,9 @@ python view.py      # -> out/map.html    "Ethnicities of Africa" explorer: Afric
 python review.py    # -> out/review.html sortable sheet of the needs_review entities
                     #                    + the rejected name-match candidates
 ```
+
+The live map above is just `docs/index.html` served by GitHub Pages; rebuild + deploy
+it with `python view.py docs/index.html`.
 
 How the partition is built: a fine grid ranks, per cell, the canonical groups whose
 territory covers the cell centre — by **population** (territory area breaks ties) —

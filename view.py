@@ -50,7 +50,8 @@ def _round_geom(g):
     return m
 
 
-def main():
+def main(out_html=None):
+    out_html = out_html or f"{OUT}/map.html"
     c = gpd.read_parquet(f"{OUT}/canonical.parquet")
     poly = c[c.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
     poly["geometry"] = poly.geometry.buffer(0)
@@ -148,8 +149,10 @@ def main():
     m.get_root().header.add_child(folium.Element(_CSS))
     m.get_root().html.add_child(folium.Element(_PANEL))
     m.get_root().html.add_child(folium.Element(_JS.replace("__MAP__", map_var)))
-    m.save(f"{OUT}/map.html")
-    print(f"wrote {OUT}/map.html  ({len(ethno)} ethnicities)")
+    import os
+    os.makedirs(os.path.dirname(out_html) or ".", exist_ok=True)
+    m.save(out_html)
+    print(f"wrote {out_html}  ({len(ethno)} ethnicities)")
 
 
 _CSS = """
@@ -175,9 +178,13 @@ _CSS = """
   background:#d7263d;color:#fff;border-radius:5px;font-size:12px;cursor:pointer}
 #afef-legend{position:fixed;bottom:14px;left:12px;z-index:10000;background:#fff;
   font-family:sans-serif;font-size:11px;border-radius:8px;padding:8px 11px;
-  box-shadow:0 1px 8px rgba(0,0,0,.3);max-width:230px}
+  box-shadow:0 1px 8px rgba(0,0,0,.3);max-width:250px}
 #afef-legend b{font-size:12px}
-#afef-legend .row{display:flex;align-items:center;gap:6px;margin-top:3px}
+#afef-legend-list{max-height:52vh;overflow-y:auto;margin-top:5px;padding-right:2px}
+#afef-legend .row{display:flex;align-items:center;gap:6px;margin-top:2px;cursor:pointer;
+  padding:2px 3px;border-radius:3px}
+#afef-legend .row:hover{background:#f0f0f0}
+#afef-legend .row.on{background:#fde7ea;font-weight:600}
 </style>
 """
 
@@ -262,7 +269,7 @@ _JS = """
     function clearSel(){ selected=null; if(hi){map.removeLayer(hi);hi=null;}
       clearBtn.style.display="none"; ul.style.display="none";
       layers[mode].setStyle(baseStyle);
-      sub.textContent="Each region coloured by its "+RANKW[mode]+" ethnicity"; }
+      sub.textContent="Each region coloured by its "+RANKW[mode]+" ethnicity"; legend(); }
     clearBtn.onclick=function(){ q.value=""; clearSel(); };
 
     function pick(name){
@@ -270,7 +277,7 @@ _JS = """
       layers[mode].setStyle(baseStyle); buildHi();
       var e=ETHNO[name];
       if(e&&e.bbox) map.fitBounds(e.bbox,{maxZoom:7,padding:[30,30]});
-      sub.textContent="Showing where "+name+" appear (any rank)";
+      sub.textContent="Showing where "+name+" appear (any rank)"; legend();
     }
     function search(){
       var s=q.value.trim().toLowerCase();
@@ -295,15 +302,30 @@ _JS = """
 
     function legend(){
       var arr=DATA[String(mode)].features.map(function(f){return [f.properties.name,f.properties.area||0];})
-                .sort(function(a,b){return b[1]-a[1];}).slice(0,12);
-      var h="<b>Largest territories (rank "+mode+")</b>";
-      arr.forEach(function(r){ h+="<div class='row'><span class='afef-sw' style='background:"+
-        (ETHNO[r[0]]||{}).color+"'></span>"+r[0]+"</div>"; });
-      document.getElementById("afef-legend").innerHTML=h;
+                .sort(function(a,b){return b[1]-a[1];});
+      var el=document.getElementById("afef-legend"); el.innerHTML="";
+      var head=document.createElement("div");
+      head.innerHTML="<b>Groups · rank "+mode+"</b> <span style='color:#999'>("+arr.length+")</span>"+
+        "<div style='color:#999;font-size:10px'>scroll · click a group to locate it</div>";
+      el.appendChild(head);
+      var list=document.createElement("div"); list.id="afef-legend-list";
+      arr.forEach(function(r){
+        var row=document.createElement("div");
+        row.className="row"+(r[0]===selected?" on":"");
+        var sw=document.createElement("span"); sw.className="afef-sw";
+        sw.style.background=(ETHNO[r[0]]||{}).color;
+        var nm=document.createElement("span"); nm.textContent=r[0];
+        row.appendChild(sw); row.appendChild(nm);
+        row.onmousedown=function(ev){ ev.preventDefault(); pick(r[0]); };
+        list.appendChild(row);
+      });
+      el.appendChild(list);
     }
 
-    if(L&&L.DomEvent){ var pnl=document.getElementById("afef-panel");
-      L.DomEvent.disableClickPropagation(pnl); L.DomEvent.disableScrollPropagation(pnl); }
+    if(L&&L.DomEvent){
+      ["afef-panel","afef-legend"].forEach(function(id){ var e=document.getElementById(id);
+        L.DomEvent.disableClickPropagation(e); L.DomEvent.disableScrollPropagation(e); });
+    }
     legend();
   });
 })();
@@ -312,4 +334,5 @@ _JS = """
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(sys.argv[1] if len(sys.argv) > 1 else None)
