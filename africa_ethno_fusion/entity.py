@@ -80,7 +80,8 @@ TRAIT_VARS = {
 CANON_COLUMNS = [
     "canonical_id", "preferred_name", "alt_names", "sources", "n_sources",
     "glottocode", "iso639_3", "ea_society_id", "language_family",
-    "lat", "lon", "area_sqkm", "has_historical", "has_modern",
+    "lat", "lon", "area_sqkm", "geom_source",
+    "has_historical", "has_modern", "has_language_area",
     "historical_wkt", "modern_wkt",
     "population_total", "primary_religion",
     "trait_subsistence", "trait_settlement", "trait_politics", "trait_descent", "trait_class",
@@ -363,16 +364,27 @@ def _build_entity(cid, members, trait_map, fuzzy_min):
         except Exception:
             pass
 
+    # Pick a display geometry, preferring the most ethnographically meaningful:
+    # historical homeland (Murdock) > modern settlement (GeoEPR) >
+    # language-speaker area (Glottography) > a representative point.
     hist = _union_geom(members, "murdock_map")
     modern = _union_geom(members, "geoepr")
-    primary = hist or modern
-    if primary is None:  # fall back to a representative point
+    lang_area = _union_geom(members, "glottography")
+    if hist is not None:
+        primary, geom_source = hist, "historical_homeland"
+    elif modern is not None:
+        primary, geom_source = modern, "modern_settlement"
+    elif lang_area is not None:
+        primary, geom_source = lang_area, "language_area"
+    else:
         pts = members[members.geometry.notna()]
         primary = pts.geometry.union_all().centroid if not pts.empty else None
+        geom_source = "point" if primary is not None else None
 
     area = None
-    if hist is not None:
-        area = float(gpd.GeoSeries([hist], crs=4326).to_crs(6933).area.iloc[0] / 1e6)
+    poly_for_area = hist or modern or lang_area
+    if poly_for_area is not None:
+        area = float(gpd.GeoSeries([poly_for_area], crs=4326).to_crs(6933).area.iloc[0] / 1e6)
 
     rep = primary.centroid if (primary is not None and primary.geom_type != "Point") else primary
     lat = rep.y if rep is not None else _mode(members["lat"])
@@ -407,8 +419,10 @@ def _build_entity(cid, members, trait_map, fuzzy_min):
         "lat": lat,
         "lon": lon,
         "area_sqkm": area,
+        "geom_source": geom_source,
         "has_historical": hist is not None,
         "has_modern": modern is not None,
+        "has_language_area": lang_area is not None,
         "historical_wkt": hist.wkt if hist is not None else None,
         "modern_wkt": modern.wkt if modern is not None else None,
         "population_total": pop,

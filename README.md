@@ -97,12 +97,19 @@ download without credentials and are built by default.
 Two self-contained HTML views (build first, then run):
 
 ```bash
-python view.py      # -> out/map.html    interactive map; the canonical layer is
-                    #                    the centerpiece (colored by corroboration),
-                    #                    with a name search box; raw sources toggle on
+python view.py      # -> out/map.html    "Ethnicities of Africa" explorer: the
+                    #                    continent is tiled into cells, each coloured
+                    #                    by the MOST COMMON ethnicity there. Buttons
+                    #                    switch to the 2nd/3rd most common; a selector
+                    #                    highlights everywhere one ethnicity appears.
 python review.py    # -> out/review.html sortable sheet of the needs_review entities
                     #                    + the rejected name-match candidates
 ```
+
+The explorer ranks, per cell, the canonical groups whose territory covers the cell
+centre — by **population** (territory area breaks ties). "Territory" prefers the
+historical homeland (Murdock) → modern settlement (GeoEPR) → language-speaker area
+(Glottography). Ranking metric and cell size (`STEP`) are easy to tune in `view.py`.
 
 ## What it enables
 

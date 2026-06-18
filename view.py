@@ -1,225 +1,312 @@
 #!/usr/bin/env python3
-"""Render the fused dataset as an interactive Leaflet map (out/map.html).
+"""Build an interactive 'dominant ethnicity' explorer for Africa -> out/map.html.
 
-The CANONICAL layer is the centrepiece: one resolved entity per real-world
-ethnic group (out/canonical.parquet), drawn as its representative geometry
-(historical/modern territory polygon where one exists, else a society/people
-point). Colour encodes corroboration (how many sources agree); a rich popup
-shows identity, language, population, key Ethnographic Atlas traits, the merge
-confidence and a needs-review badge.
+Africa is tiled into a grid. For each cell we rank the canonical ethnic groups
+whose territory covers the cell centre, by population (territory area breaks
+ties / fills gaps). The map colours each cell by its #1 group; UI buttons switch
+the colouring to the 2nd / 3rd most common group; and a selector highlights every
+cell where one chosen ethnicity appears.
 
-Layers (toggle in the top-right control):
-  * Canonical entities — polygons (territories)        [ON by default]
-  * Canonical entities — points (society/people)       [ON by default]
-  * Murdock ethnic territories (~1900) + EA traits     [off]
-  * GeoEPR modern settlement areas                     [off]
-  * Ethnographic Atlas societies (raw points)          [off]
-  * Joshua Project people groups (today)               [off]
-
-A self-contained name SEARCH box (top-left, no external CDN) locates and zooms
-to any canonical entity by preferred name.
-
-Entry point:  python view.py   ->  writes out/map.html
+Run: python view.py   (after building out/canonical.parquet)
 """
+import hashlib
 import json
 
 import folium
 import geopandas as gpd
+import numpy as np
 import pandas as pd
-from folium.plugins import MarkerCluster
-
-from view_canonical import add_canonical_layers, add_search_box
+from shapely.geometry import box
 
 OUT = "out"
+STEP = 0.7  # grid cell size in degrees (~78 km). Smaller = finer + bigger file.
 
-# --------------------------------------------------------------------------- #
-#  Base map
-# --------------------------------------------------------------------------- #
-m = folium.Map(
-    location=[3, 20],
-    zoom_start=4,
-    tiles="CartoDB positron",
-    control_scale=True,
-)
 
-# --------------------------------------------------------------------------- #
-#  CENTREPIECE — the canonical (resolved) layer
-# --------------------------------------------------------------------------- #
-canonical = gpd.read_parquet(f"{OUT}/canonical.parquet")
-search_index, n_poly, n_pt = add_canonical_layers(m, canonical)
+def color_for(name):
+    """Deterministic, well-spread colour per ethnicity name (CSS hsl string)."""
+    if not name:
+        return None
+    h = int(hashlib.md5(name.encode("utf-8")).hexdigest(), 16)
+    hue = h % 360
+    sat = 58 + (h // 360) % 30        # 58–88
+    lig = 45 + (h // 11000) % 18      # 45–63
+    return f"hsl({hue},{sat}%,{lig}%)"
 
-# --------------------------------------------------------------------------- #
-#  Raw source layers (kept, all OFF by default)
-# --------------------------------------------------------------------------- #
-g = gpd.read_parquet(f"{OUT}/groups.parquet")
-traits = pd.read_parquet(f"{OUT}/traits.parquet")
 
-# key Ethnographic Atlas traits, pivoted to one row per society
-KEY_VARS = {
-    "EA005": "Agriculture",
-    "EA030": "Settlement",
-    "EA033": "Politics",
-    "EA043": "Descent",
-    "EA066": "Class",
-}
-tt = traits[traits.var_id.isin(KEY_VARS)].copy()
-tt["lab"] = tt.var_id.map(KEY_VARS)
-piv = tt.pivot_table(
-    index="ea_society_id", columns="lab", values="value_label", aggfunc="first"
-)
+def main():
+    c = gpd.read_parquet(f"{OUT}/canonical.parquet")
+    poly = c[c.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+    poly["geometry"] = poly.geometry.buffer(0)  # repair invalid
+    poly = poly[~poly.geometry.is_empty & poly.geometry.notna()]
+    poly["pop"] = pd.to_numeric(poly["population_total"], errors="coerce").fillna(0.0)
+    poly["area_"] = pd.to_numeric(poly["area_sqkm"], errors="coerce").fillna(1e12)
+    print(f"{len(poly)} territory entities feed the dominance grid")
 
-# --- Murdock territories + traits ---
-mur = g[g.source == "murdock_map"].copy()
-mur["geometry"] = mur.geometry.simplify(0.03)
-mur = mur.merge(piv, left_on="ea_society_id", right_index=True, how="left")
-trait_cols = list(KEY_VARS.values())
-show_cols = ["name", "ea_society_id"] + trait_cols
-for c in show_cols:
-    mur[c] = mur[c].fillna("—").astype(str)
-folium.GeoJson(
-    mur[show_cols + ["geometry"]],
-    name="Murdock territories (~1900) + traits",
-    show=False,
-    style_function=lambda f: {
-        "fillColor": "#3186cc",
-        "color": "#13496f",
-        "weight": 0.5,
-        "fillOpacity": 0.35,
-    },
-    highlight_function=lambda f: {"weight": 2, "fillOpacity": 0.6},
-    tooltip=folium.GeoJsonTooltip(
-        fields=show_cols,
-        aliases=[
-            "Group",
-            "EA id",
-            "Agriculture",
-            "Settlement",
-            "Political complexity",
-            "Descent",
-            "Class",
-        ],
-        sticky=True,
-        max_width=420,
-    ),
-).add_to(m)
-
-# --- GeoEPR modern settlement areas (latest period per group) ---
-ge = g[g.source == "geoepr"].copy()
-ge["period_to"] = pd.to_numeric(ge["period_to"], errors="coerce")
-ge = ge.sort_values("period_to").groupby("name", as_index=False).tail(1)
-ge["geometry"] = ge.geometry.simplify(0.03)
-ge["period"] = (
-    ge["period_from"].astype("Int64").astype(str)
-    + "–"
-    + ge["period_to"].astype("Int64").astype(str)
-)
-folium.GeoJson(
-    ge[["name", "settlement_type", "period", "geometry"]],
-    name="GeoEPR settlement areas (modern)",
-    show=False,
-    style_function=lambda f: {
-        "fillColor": "#cc5b31",
-        "color": "#7a3413",
-        "weight": 0.5,
-        "fillOpacity": 0.30,
-    },
-    tooltip=folium.GeoJsonTooltip(
-        fields=["name", "settlement_type", "period"],
-        aliases=["Group", "Settlement", "Period"],
-    ),
-).add_to(m)
-
-# --- D-PLACE society points with full trait popup ---
-fg = folium.FeatureGroup(name="Ethnographic Atlas societies (raw points)", show=False)
-cluster = MarkerCluster().add_to(fg)
-dp = g[(g.source == "dplace_ea") & g.geometry.notna()]
-for _, r in dp.iterrows():
-    soc = r["ea_society_id"]
-    rows = traits[traits.ea_society_id == soc]
-    items = "".join(
-        f"<tr><td><b>{v.var_id}</b> {v.var_title}</td><td>{v.value_label}</td></tr>"
-        for v in rows.itertuples()
-        if pd.notna(v.value_label)
+    # ---- build the grid (only cells whose centre falls in some territory) ----
+    minx, miny, maxx, maxy = poly.total_bounds
+    xs = np.arange(np.floor(minx), np.ceil(maxx), STEP)
+    ys = np.arange(np.floor(miny), np.ceil(maxy), STEP)
+    cells, cellxy = [], {}
+    k = 0
+    for x in xs:
+        for y in ys:
+            cells.append(box(x, y, x + STEP, y + STEP))
+            cellxy[k] = (float(x), float(y))
+            k += 1
+    grid = gpd.GeoDataFrame({"cell_id": list(range(k))}, geometry=cells, crs=4326)
+    # cell centres computed directly from the box origin (avoids the geographic-CRS
+    # centroid warning and is exact for axis-aligned boxes).
+    from shapely.geometry import Point
+    cent = gpd.GeoDataFrame(
+        {"cell_id": list(range(k))},
+        geometry=[Point(cellxy[i][0] + STEP / 2, cellxy[i][1] + STEP / 2) for i in range(k)],
+        crs=4326,
     )
-    html = (
-        f"<b>{r['name']}</b> ({soc})<br>glottocode: {r['glottocode']}<br>"
-        f"<table style='font-size:11px'>{items}</table>"
+
+    # ---- rank ethnicities per cell: population desc, then smaller territory ----
+    j = gpd.sjoin(
+        cent[["cell_id", "geometry"]],
+        poly[["preferred_name", "pop", "area_", "geometry"]],
+        predicate="within",
     )
-    folium.CircleMarker(
-        [r.geometry.y, r.geometry.x],
-        radius=4,
-        color="#2b7a2b",
-        fill=True,
-        fill_opacity=0.8,
-        popup=folium.Popup(html, max_width=480),
-        tooltip=r["name"],
-    ).add_to(cluster)
-fg.add_to(m)
+    j = j.dropna(subset=["preferred_name"])
+    j = j.sort_values(["cell_id", "pop", "area_"], ascending=[True, False, True])
+    j = j.drop_duplicates(["cell_id", "preferred_name"])
+    j["rank"] = j.groupby("cell_id").cumcount() + 1
+    top = j[j["rank"] <= 3]
 
-# --- Joshua Project contemporary people groups (clustered) ---
-jp = g[(g.source == "joshua_project") & g.geometry.notna()]
-if not jp.empty:
-    fgj = folium.FeatureGroup(name="Joshua Project people groups (today)", show=False)
-    cj = MarkerCluster().add_to(fgj)
-    for _, r in jp.iterrows():
-        pop = f"{r['population']:,.0f}" if pd.notna(r["population"]) else "—"
-        html = (
-            f"<b>{r['name']}</b><br>country: {r['country_iso3']}<br>"
-            f"language (ISO 639-3): {r['iso639_3']}<br>"
-            f"population: {pop}<br>religion: {r['primary_religion']}"
-        )
-        folium.CircleMarker(
-            [r.geometry.y, r.geometry.x],
-            radius=3,
-            color="#7a2b7a",
-            fill=True,
-            fill_opacity=0.8,
-            popup=folium.Popup(html, max_width=320),
-            tooltip=r["name"],
-        ).add_to(cj)
-    fgj.add_to(m)
+    cellinfo = {}
+    for cid, name, pop, rank in top[["cell_id", "preferred_name", "pop", "rank"]].itertuples(index=False):
+        d = cellinfo.setdefault(int(cid), {})
+        d[f"r{rank}"] = name
+        d[f"p{rank}"] = int(pop) if pop and pop > 0 else 0
+    print(f"{len(cellinfo)} populated grid cells")
 
-# --------------------------------------------------------------------------- #
-#  Controls, search, legend, title
-# --------------------------------------------------------------------------- #
-folium.LayerControl(collapsed=False).add_to(m)
+    # ---- per-name bbox (for the 'find this ethnicity' zoom) ----
+    names_all = {d[f"r{r}"] for d in cellinfo.values() for r in (1, 2, 3) if d.get(f"r{r}")}
+    bounds = poly.groupby("preferred_name").agg(
+        minx=("geometry", lambda g: g.total_bounds[0]),
+        miny=("geometry", lambda g: g.total_bounds[1]),
+        maxx=("geometry", lambda g: g.total_bounds[2]),
+        maxy=("geometry", lambda g: g.total_bounds[3]),
+    )
+    ethno = {}
+    for nm in sorted(names_all):
+        col = color_for(nm)
+        bbox = None
+        if nm in bounds.index:
+            b = bounds.loc[nm]
+            bbox = [[float(b.miny), float(b.minx)], [float(b.maxy), float(b.maxx)]]
+        ethno[nm] = {"color": col, "bbox": bbox}
 
-add_search_box(m, search_index)
+    # ---- grid GeoJSON ----
+    def ring(x, y, s):
+        return [[round(x, 3), round(y, 3)], [round(x + s, 3), round(y, 3)],
+                [round(x + s, 3), round(y + s, 3)], [round(x, 3), round(y + s, 3)],
+                [round(x, 3), round(y, 3)]]
 
-legend = (
-    "<div style='position:fixed;bottom:18px;right:12px;z-index:9999;background:white;"
-    "padding:8px 12px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.3);"
-    "font-family:sans-serif;font-size:12px;line-height:1.5'>"
-    "<b>Canonical — sources agreeing</b><br>"
-    "<span style='color:#9e9ac8'>●</span> 1 (single source)&nbsp; "
-    "<span style='color:#6a51a3'>●</span> 2<br>"
-    "<span style='color:#fd8d3c'>●</span> 3&nbsp; "
-    "<span style='color:#e6550d'>●</span> 4&nbsp; "
-    "<span style='color:#a63603'>●</span> 5+<br>"
-    "<span style='color:#888'>▱</span> polygon = territory&nbsp; "
-    "<span style='color:#888'>●</span> dot = point only<br>"
-    "<span style='background:#d7263d;color:#fff;padding:0 4px;border-radius:3px'>"
-    "⚑ review</span> = name-based merge"
-    "</div>"
-)
-m.get_root().html.add_child(folium.Element(legend))
+    feats = []
+    for cid, d in cellinfo.items():
+        x, y = cellxy[cid]
+        props = {}
+        for r in (1, 2, 3):
+            nm = d.get(f"r{r}")
+            props[f"r{r}"] = nm
+            props[f"p{r}"] = d.get(f"p{r}", 0)
+            props[f"c{r}"] = color_for(nm) if nm else None
+        feats.append({"type": "Feature", "properties": props,
+                      "geometry": {"type": "Polygon", "coordinates": [ring(x, y, STEP)]}})
+    grid_geojson = {"type": "FeatureCollection", "features": feats}
 
-title = (
-    "<div style='position:fixed;top:10px;left:50%;transform:translateX(-50%);"
-    "z-index:9999;background:white;padding:6px 14px;border-radius:6px;"
-    "box-shadow:0 1px 4px rgba(0,0,0,.3);font-family:sans-serif;font-size:13px;"
-    "text-align:center'>"
-    "<b>Africa — fused ethnographic map</b><br>"
-    f"<span style='color:#555;font-size:11px'>{len(canonical):,} canonical entities "
-    f"({n_poly:,} territories · {n_pt:,} points) — search by name, top-left</span>"
-    "</div>"
-)
-m.get_root().html.add_child(folium.Element(title))
+    # ---- assemble map ----
+    m = folium.Map(location=[2.5, 19], zoom_start=4, tiles="CartoDB positron",
+                   control_scale=True)
+    map_var = m.get_name()
+    payload = (
+        "<script>window.AFEF=" +
+        json.dumps({"grid": grid_geojson, "ethno": ethno}, ensure_ascii=False) +
+        ";</script>"
+    )
+    m.get_root().html.add_child(folium.Element(payload))
+    m.get_root().header.add_child(folium.Element(_CSS))
+    m.get_root().html.add_child(folium.Element(_PANEL))
+    m.get_root().html.add_child(folium.Element(_JS.replace("__MAP__", map_var)))
 
-m.save(f"{OUT}/map.html")
-print(
-    f"wrote {OUT}/map.html  "
-    f"({len(canonical):,} canonical: {n_poly:,} polygons + {n_pt:,} points; "
-    f"raw layers: {len(mur)} Murdock, {len(ge)} GeoEPR, {len(dp)} EA pts, "
-    f"{len(jp)} JP pts)"
-)
+    m.save(f"{OUT}/map.html")
+    print(f"wrote {OUT}/map.html  ({len(feats)} cells, {len(ethno)} ethnicities)")
+
+
+_CSS = """
+<style>
+#afef-panel{position:fixed;top:12px;left:12px;z-index:10000;font-family:sans-serif;
+  width:300px;background:#fff;border-radius:8px;box-shadow:0 1px 8px rgba(0,0,0,.3);
+  padding:12px 14px}
+#afef-panel h3{margin:0 0 2px;font-size:15px}
+#afef-panel .sub{color:#777;font-size:11px;margin-bottom:8px}
+.afef-modes{display:flex;gap:6px;margin-bottom:8px}
+.afef-modes button{flex:1;padding:6px 0;border:1px solid #ccc;background:#f7f7f7;
+  border-radius:5px;font-size:12px;cursor:pointer}
+.afef-modes button.on{background:#333;color:#fff;border-color:#333}
+#afef-q{width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #bbb;
+  border-radius:6px;font-size:13px}
+#afef-res{list-style:none;margin:3px 0 0;padding:0;max-height:34vh;overflow:auto;
+  border-radius:6px;display:none;border:1px solid #eee}
+#afef-res li{padding:6px 9px;font-size:12px;cursor:pointer;display:flex;
+  align-items:center;gap:7px;border-bottom:1px solid #f2f2f2}
+#afef-res li:hover,#afef-res li.on{background:#f0f0f0}
+.afef-sw{width:12px;height:12px;border-radius:3px;flex:none}
+#afef-clear{display:none;margin-top:8px;width:100%;padding:6px 0;border:0;
+  background:#d7263d;color:#fff;border-radius:5px;font-size:12px;cursor:pointer}
+#afef-legend{position:fixed;bottom:14px;left:12px;z-index:10000;background:#fff;
+  font-family:sans-serif;font-size:11px;border-radius:8px;padding:8px 11px;
+  box-shadow:0 1px 8px rgba(0,0,0,.3);max-width:230px}
+#afef-legend b{font-size:12px}
+#afef-legend .row{display:flex;align-items:center;gap:6px;margin-top:3px}
+.afef-tip b{color:#111}
+</style>
+"""
+
+_PANEL = """
+<div id="afef-panel">
+  <h3>Ethnicities of Africa</h3>
+  <div class="sub" id="afef-modesub">Colour = most common group in each cell</div>
+  <div class="afef-modes">
+    <button data-m="1" class="on">1st</button>
+    <button data-m="2">2nd</button>
+    <button data-m="3">3rd</button>
+  </div>
+  <input id="afef-q" type="text" autocomplete="off" spellcheck="false"
+         placeholder="Find one ethnicity → see where they live" />
+  <ul id="afef-res"></ul>
+  <button id="afef-clear">✕ clear selection — show dominance map</button>
+</div>
+<div id="afef-legend"></div>
+"""
+
+_JS = """
+<script>
+(function(){
+  function ready(fn){ if(typeof __MAP__!=="undefined" && window.AFEF){fn();}
+                      else {setTimeout(function(){ready(fn);},60);} }
+  ready(function(){
+    var map=__MAP__, GRID=window.AFEF.grid, ETHNO=window.AFEF.ethno;
+    var mode=1, selected=null, marker=null;
+    var EMPTY="#e9e9e9";
+
+    function fmt(n){ return (n&&n>0)? Number(n).toLocaleString() : ""; }
+
+    function cellStyle(f){
+      var p=f.properties, fill=EMPTY, op=0.06, line=0.1, lc="#fff";
+      if(selected){
+        var present=[p.r1,p.r2,p.r3].indexOf(selected);
+        if(present>=0){ fill=(ETHNO[selected]||{}).color||"#d7263d"; op=0.85;
+                        line=0.6; lc="#7a0010"; }
+        else { fill=EMPTY; op=0.05; }
+      } else {
+        var col=p["c"+mode];
+        if(col){ fill=col; op=0.72; } else { fill=EMPTY; op=0.05; }
+      }
+      return {fillColor:fill,color:lc,weight:line,fillOpacity:op};
+    }
+
+    function tip(p){
+      var rows=[["1st",p.r1,p.p1],["2nd",p.r2,p.p2],["3rd",p.r3,p.p3]];
+      var h="<div class='afef-tip'>";
+      rows.forEach(function(r){
+        if(r[1]){ var hl=(selected&&r[1]===selected)?";color:#d7263d":"";
+          h+="<div style='font-size:11px"+hl+"'>"+r[0]+": <b>"+r[1]+"</b>"+
+             (r[2]?" · "+fmt(r[2]):"")+"</div>"; }
+      });
+      return h+"</div>";
+    }
+
+    var layer=L.geoJSON(GRID,{style:cellStyle,
+      onEachFeature:function(f,l){ l.bindTooltip(tip(f.properties),{sticky:true}); }
+    }).addTo(map);
+    function restyle(){ layer.setStyle(cellStyle);
+      layer.eachLayer(function(l){ l.setTooltipContent(tip(l.feature.properties)); }); }
+
+    // ---- mode buttons ----
+    var sub=document.getElementById("afef-modesub");
+    var SUBT={1:"Colour = most common group in each cell",
+              2:"Colour = 2nd most common group",
+              3:"Colour = 3rd most common group"};
+    document.querySelectorAll(".afef-modes button").forEach(function(b){
+      b.onclick=function(){
+        document.querySelectorAll(".afef-modes button").forEach(function(x){x.classList.remove("on");});
+        b.classList.add("on"); mode=+b.dataset.m; sub.textContent=SUBT[mode];
+        clearSel(); restyle(); legend();
+      };
+    });
+
+    // ---- legend: top dominant groups for current mode ----
+    function legend(){
+      var counts={};
+      GRID.features.forEach(function(f){ var n=f.properties["r"+mode];
+        if(n) counts[n]=(counts[n]||0)+1; });
+      var arr=Object.keys(counts).map(function(n){return [n,counts[n]];})
+                .sort(function(a,b){return b[1]-a[1];}).slice(0,12);
+      var h="<b>Top groups (rank "+mode+")</b>";
+      arr.forEach(function(r){
+        h+="<div class='row'><span class='afef-sw' style='background:"+
+           (ETHNO[r[0]]||{}).color+"'></span>"+r[0]+" <span style='color:#999'>("+r[1]+")</span></div>";
+      });
+      document.getElementById("afef-legend").innerHTML=h;
+    }
+
+    // ---- selector: find one ethnicity, highlight where it lives ----
+    var q=document.getElementById("afef-q"), ul=document.getElementById("afef-res");
+    var clearBtn=document.getElementById("afef-clear");
+    var NAMES=Object.keys(ETHNO).sort();
+
+    function clearSel(){ selected=null; if(marker){map.removeLayer(marker);marker=null;}
+      clearBtn.style.display="none"; ul.style.display="none"; }
+    clearBtn.onclick=function(){ clearSel(); q.value=""; restyle(); legend(); };
+
+    function pick(name){
+      selected=name; ul.style.display="none"; q.value=name;
+      clearBtn.style.display="block";
+      var e=ETHNO[name];
+      if(e&&e.bbox){ map.fitBounds(e.bbox,{maxZoom:7,padding:[30,30]}); }
+      restyle();
+      document.getElementById("afef-modesub").textContent="Showing where "+name+" appear (any rank)";
+    }
+
+    function search(){
+      var s=q.value.trim().toLowerCase();
+      if(!s){ ul.style.display="none"; return; }
+      var starts=[],has=[];
+      for(var i=0;i<NAMES.length;i++){ var nm=NAMES[i].toLowerCase();
+        if(nm.indexOf(s)===0) starts.push(NAMES[i]);
+        else if(nm.indexOf(s)>=0) has.push(NAMES[i]);
+        if(starts.length+has.length>120) break; }
+      var all=starts.concat(has).slice(0,40);
+      ul.innerHTML="";
+      if(!all.length){ ul.style.display="none"; return; }
+      all.forEach(function(n){
+        var li=document.createElement("li");
+        li.innerHTML="<span class='afef-sw' style='background:"+(ETHNO[n]||{}).color+"'></span>"+n;
+        li.onmousedown=function(ev){ ev.preventDefault(); pick(n); };
+        ul.appendChild(li);
+      });
+      ul.style.display="block";
+    }
+    q.addEventListener("input",search);
+    q.addEventListener("focus",function(){ if(q.value.trim())search(); });
+    q.addEventListener("keydown",function(e){
+      if(e.key==="Enter"){ e.preventDefault();
+        var first=ul.querySelector("li"); if(first){ first.dispatchEvent(new MouseEvent("mousedown")); } }
+      else if(e.key==="Escape"){ ul.style.display="none"; q.blur(); } });
+
+    if(L&&L.DomEvent){ var box=document.getElementById("afef-panel");
+      L.DomEvent.disableClickPropagation(box); L.DomEvent.disableScrollPropagation(box); }
+
+    legend();
+  });
+})();
+</script>
+"""
+
+
+if __name__ == "__main__":
+    main()
