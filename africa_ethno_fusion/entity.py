@@ -30,6 +30,10 @@ from shapely import wkt as shapely_wkt
 
 EXACT_METHODS = ["ea_society_id", "glottocode", "iso639_3"]
 POLYGON_SOURCES = ["murdock_map", "greg", "geoepr"]
+# sources matched by NAME: the code-less polygons + D-PLACE (clean ethnonyms),
+# so a territory can attach to a coded entity when the EA-code bridge is missing.
+# Glottolog is excluded -- its labels are language names, riskier for name joins.
+NAME_MATCH_SOURCES = ["murdock_map", "greg", "geoepr", "dplace_ea"]
 # preferred_name is taken from the highest-priority source present in a cluster
 NAME_PRIORITY = ["dplace_ea", "glottolog", "murdock_map", "joshua_project", "geoepr", "greg"]
 
@@ -79,14 +83,14 @@ class UnionFind:
 
 
 def _fuzzy_candidates(groups, recall=0.85):
-    """Top-1 fuzzy name matches (both directions) between polygon sources,
+    """Top-1 fuzzy name matches (both directions) between name-matched sources,
     annotated with score and whether the match is reciprocal."""
     try:
         from rapidfuzz import fuzz, process
     except ImportError:
         warnings.warn("rapidfuzz not installed -- entity resolution uses exact links only.")
         return []
-    present = [s for s in POLYGON_SOURCES if (groups["source"] == s).any()]
+    present = [s for s in NAME_MATCH_SOURCES if (groups["source"] == s).any()]
     cand = []
     for sa, sb in itertools.combinations(present, 2):
         A = groups[(groups["source"] == sa) & groups["name"].notna()]
@@ -117,6 +121,35 @@ def _fuzzy_candidates(groups, recall=0.85):
     return cand
 
 
+def _root_code_sets(groups, uf):
+    """Per current-root sets of authoritative codes, for the conflict guard."""
+    sets = {}
+    for rec, glo, ea in groups[["record_id", "glottocode", "ea_society_id"]].itertuples(index=False):
+        r = uf.find(rec)
+        d = sets.setdefault(r, {"glotto": set(), "ea": set()})
+        if isinstance(glo, str) and glo:
+            d["glotto"].add(glo)
+        if isinstance(ea, str) and ea:
+            d["ea"].add(ea)
+    return sets
+
+
+def _code_conflict(sets, ra, rb):
+    """True if the two clusters carry disjoint, non-empty code sets (same name
+    but provably different language/society -> do not merge)."""
+    da, db = sets.get(ra, {}), sets.get(rb, {})
+    for key in ("glotto", "ea"):
+        sa, sb = da.get(key, set()), db.get(key, set())
+        if sa and sb and sa.isdisjoint(sb):
+            return True
+    return False
+
+
+def _merge_code_sets(sets, root, ra, rb):
+    da, db = sets.get(ra, {"glotto": set(), "ea": set()}), sets.get(rb, {"glotto": set(), "ea": set()})
+    sets[root] = {"glotto": da["glotto"] | db["glotto"], "ea": da["ea"] | db["ea"]}
+
+
 def resolve_entities(groups, links, traits=None, *, fuzzy_merge=0.92, fuzzy_recall=0.85):
     groups = groups.reset_index(drop=True).copy()
     uf = UnionFind(groups["record_id"].tolist())
@@ -127,12 +160,14 @@ def resolve_entities(groups, links, traits=None, *, fuzzy_merge=0.92, fuzzy_reca
         if a in uf.parent and b in uf.parent:
             uf.union(a, b)
 
-    # --- 2. name-based merges between the code-less polygon sources ---
-    # An EXACT normalized-name match merges regardless of reciprocity (identical
-    # ethnonyms are strong evidence; the reciprocity guard is only there to make
-    # APPROXIMATE matches safe). Fuzzy matches still require reciprocity + the
-    # >= fuzzy_merge threshold. Either way the singleton rule means a name edge
-    # can attach a lone territory to an entity but never fuse two built entities.
+    # --- 2. name-based merges ---
+    # EXACT normalized-name matches may fuse two clusters outright (the
+    # continent-wide ethnolinguistic policy), UNLESS the clusters carry
+    # conflicting authoritative codes (different glottocode / EA id) -- a same
+    # name over two different languages signals genuinely different groups.
+    # APPROXIMATE matches still need reciprocity, score >= fuzzy_merge, and the
+    # singleton rule (attach a lone territory, never fuse two built entities).
+    code_sets = _root_code_sets(groups, uf)  # root -> {"glotto": set, "ea": set}
     cand = _fuzzy_candidates(groups, recall=fuzzy_recall)
     name_scores = {}   # root -> min score of name edges used
     review = []
@@ -144,12 +179,19 @@ def resolve_entities(groups, links, traits=None, *, fuzzy_merge=0.92, fuzzy_reca
         if ra == rb:
             continue
         exact_name = s >= 0.999
-        mergeable = exact_name or (s >= fuzzy_merge and c["reciprocal"])
-        if mergeable and min(uf.size(ra), uf.size(rb)) == 1:
+        if exact_name:
+            if _code_conflict(code_sets, ra, rb):
+                review.append({**c, "decision": "name_code_conflict"})
+                continue
             root = uf.union(a, b)
+            _merge_code_sets(code_sets, root, ra, rb)
+            name_scores[root] = min(name_scores.get(root, 1.0), s)
+        elif s >= fuzzy_merge and c["reciprocal"] and min(uf.size(ra), uf.size(rb)) == 1:
+            root = uf.union(a, b)
+            _merge_code_sets(code_sets, root, ra, rb)
             name_scores[root] = min(name_scores.get(root, 1.0), s)
         else:
-            reason = ("would_merge_two_entities" if mergeable          # blocked by singleton rule
+            reason = ("would_merge_two_entities" if (s >= fuzzy_merge and c["reciprocal"])
                       else "non_reciprocal" if not c["reciprocal"]
                       else "below_threshold")
             review.append({**c, "decision": reason})

@@ -162,11 +162,9 @@ def load_dplace_ea(african_only: bool = True):
     cod = pd.read_csv(f"{EA_BASE}/codes.csv")
     dat = pd.read_csv(f"{EA_BASE}/data.csv")
 
-    if african_only:
-        soc = soc[soc["id"].astype(str).str.startswith("A")].copy()
-    soc_ids = set(soc["id"])
-
-    # --- groups (points) ---
+    # --- groups (points) for ALL societies; filter to Africa GEOGRAPHICALLY ---
+    # (NOT by id prefix: Murdock codes the Horn / N. Africa / Sahel under "C",
+    # so an "A"-prefix filter would drop Amhara=Ca7, Hausa, Beja, etc.)
     lat = pd.to_numeric(soc["Lat"], errors="coerce")
     lon = pd.to_numeric(soc["Long"], errors="coerce")
     geometry = [Point(xy) if pd.notna(xy[0]) and pd.notna(xy[1]) else None
@@ -189,6 +187,9 @@ def load_dplace_ea(african_only: bool = True):
     df["name_alt"] = soc.get("alt_names_by_society")
     df["source_attrs"] = schema.jsonify_attrs(soc, ["xd_id", "HRAF_name_ID", "HRAF_link"])
     groups = schema.finalize_groups(df, gpd.GeoSeries(geometry, crs=4326), "dplace_ea")
+    if african_only:
+        groups = clip_africa_landmass(groups)
+    soc_ids = set(groups["ea_society_id"])
 
     # --- traits (long) ---
     t = dat[dat["soc_id"].isin(soc_ids)].copy()
