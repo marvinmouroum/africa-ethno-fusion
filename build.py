@@ -23,6 +23,8 @@ def main():
                    help="keep all continents (default: Africa only)")
     p.add_argument("--no-fuzzy", dest="fuzzy", action="store_false",
                    help="skip fuzzy name crosswalk between polygon datasets")
+    p.add_argument("--no-resolve", dest="resolve", action="store_false",
+                   help="skip entity resolution (don't build the canonical layer)")
     p.add_argument("--jp-api-key", default=None, help="Joshua Project API key (free)")
     p.add_argument("--jp-csv", default=None, help="local Joshua Project CSV instead of the API")
     args = p.parse_args()
@@ -32,6 +34,7 @@ def main():
         args.sources,
         african_only=args.african_only,
         fuzzy_crosswalk=args.fuzzy,
+        resolve=args.resolve,
         jp_api_key=args.jp_api_key,
         jp_csv=args.jp_csv,
     )

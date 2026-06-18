@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import warnings
 
 import requests
 
@@ -46,6 +47,53 @@ def cached_download(url: str, filename: str | None = None, force: bool = False) 
 
 
 def clip_africa(gdf):
-    """Bounding-box filter to the African continent (fast, approximate)."""
+    """Bounding-box filter to the African continent (fast, approximate).
+
+    Use for sources already scoped to Africa by their own attributes
+    (Glottolog macroarea, JP continent, EA region prefix). The bbox keeps
+    offshore island groups that a strict landmass polygon might clip.
+    """
     minx, miny, maxx, maxy = AFRICA_BBOX
     return gdf.cx[minx:maxx, miny:maxy].copy()
+
+
+# Natural Earth countries (50m) -> dissolved Africa landmass, for clipping the
+# GLOBAL sources (GREG / GeoEPR) so non-African groups (Kurds, Persians, ...)
+# inside the bbox don't leak in.
+NE_COUNTRIES = (
+    "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/"
+    "geojson/ne_50m_admin_0_countries.geojson"
+)
+_AFRICA_MASK = None
+
+
+def africa_landmass():
+    """Dissolved polygon of all CONTINENT == 'Africa' countries (incl. island
+    states). Cached; returns None if the boundary can't be fetched."""
+    global _AFRICA_MASK
+    if _AFRICA_MASK is not None:
+        return _AFRICA_MASK if _AFRICA_MASK is not False else None
+    import geopandas as gpd
+
+    try:
+        p = cached_download(NE_COUNTRIES, "ne_50m_countries.geojson")
+        w = gpd.read_file(p)
+        col = next(c for c in w.columns if c.lower() == "continent")
+        af = w[w[col] == "Africa"]
+        _AFRICA_MASK = af.geometry.union_all()
+    except Exception as exc:  # degrade to bbox-only
+        warnings.warn(f"Africa landmass mask unavailable ({exc}); using bbox only.")
+        _AFRICA_MASK = False
+        return None
+    return _AFRICA_MASK
+
+
+def clip_africa_landmass(gdf):
+    """bbox prefilter, then keep only features whose representative point falls
+    on the African landmass. For the global GREG/GeoEPR sources."""
+    g = clip_africa(gdf)
+    mask = africa_landmass()
+    if mask is None or g.empty:
+        return g
+    inside = g.geometry.representative_point().within(mask)
+    return g[inside.values].copy()

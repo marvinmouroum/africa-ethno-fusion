@@ -19,15 +19,36 @@ GREG (1964) ┐
 GeoEPR  ────┘
 ```
 
-### Three tables
+### Tables
 
 | table | type | grain | purpose |
 |---|---|---|---|
-| **`groups`** | GeoDataFrame (EPSG:4326) | one ethnic-group/society record per source | the spine: geometry + identity + crosswalk keys |
+| **`groups`** | GeoDataFrame (EPSG:4326) | one ethnic-group/society record per source | the spine: geometry + identity + crosswalk keys (+ `canonical_id`) |
 | **`traits`** | DataFrame (tidy/long) | society × variable | the ethnographic "situation" (mostly Ethnographic Atlas) |
 | **`links`** | DataFrame | record ↔ record | crosswalk with method + confidence |
+| **`canonical`** | GeoDataFrame | **one resolved entity per real-world group** | the unified "one data source" layer (see below) |
+| **`review_candidates`** | DataFrame | fuzzy pair | name matches that were *not* auto-merged, for review |
 
-See `africa_ethno_fusion/schema.py` for the exact column list and docs.
+See `africa_ethno_fusion/schema.py` and `entity.py` for the exact columns.
+
+### The canonical layer (entity resolution)
+
+`canonical` collapses the per-source records into one row per real-world group by
+running connected-components over `links`:
+
+* **Exact-code merges** (EA id / glottocode / ISO 639-3) are trusted fully — this
+  is the chain `Murdock → Ethnographic Atlas → Glottolog → Joshua Project`.
+* **Code-less territories** (GREG, GeoEPR) attach by name: an *exact* normalized
+  name merges directly; an *approximate* name needs to be a reciprocal best match
+  with score ≥ 0.92. A **singleton rule** lets a name edge attach a lone territory
+  to an entity but never fuse two already-built entities (no giant-component blow-up).
+* Everything weaker lands in `review_candidates`; any name-based merge sets
+  `needs_review = True` with a `merge_confidence` score.
+
+Each canonical row carries: `preferred_name`, `alt_names`, contributing `sources`,
+consensus `glottocode`/`iso639_3`/`ea_society_id`/`language_family`,
+`historical`+`modern` geometry, `area_sqkm`, `population_total`, `primary_religion`,
+key EA traits (subsistence/settlement/politics/descent/class), and `member_record_ids`.
 
 ## Sources
 
@@ -58,9 +79,15 @@ Or from Python:
 
 ```python
 from africa_ethno_fusion import build, export
-frames = build()                         # {"groups","traits","links"}
+frames = build()                         # {"groups","traits","links","canonical","review_candidates"}
 export(frames, "out")
+
+canonical = frames["canonical"]          # one row per resolved ethnic group
+canonical[canonical.preferred_name == "Kikuyu"]
 ```
+
+Pass `--no-resolve` (or `resolve=False`) to skip entity resolution and emit only
+the raw `groups`/`traits`/`links` star schema.
 
 ## What it enables
 

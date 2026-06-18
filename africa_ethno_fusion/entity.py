@@ -1,0 +1,295 @@
+"""Entity resolution: collapse per-source records into canonical ethnic-group
+entities -- the "one data source" layer.
+
+Strategy (the "balanced" policy):
+  1. Union-find over all EXACT-code links (ea_society_id / glottocode / iso639_3).
+     Transitivity is trusted here -- shared codes are authoritative.
+  2. Fold in fuzzy name matches between the code-less polygon sources
+     (murdock_map / greg / geoepr) only when they are RECIPROCAL best matches
+     with score >= 0.92, AND at least one endpoint is still a singleton.
+     The singleton rule means a fuzzy edge can ATTACH a lone territory to an
+     existing entity but can never FUSE two already-built entities -> no
+     transitive chaining / giant-component blow-up.
+  3. Everything weaker (below threshold, non-reciprocal, or a rejected
+     would-fuse-two-entities edge) is emitted to `review_candidates` instead.
+
+Outputs:
+  canonical        -- GeoDataFrame, one row per resolved entity
+  review_candidates -- DataFrame of fuzzy pairs that were NOT auto-merged
+  groups           -- the input groups with a `canonical_id` column added
+"""
+from __future__ import annotations
+
+import itertools
+import json
+import warnings
+
+import geopandas as gpd
+import pandas as pd
+from shapely import wkt as shapely_wkt
+
+EXACT_METHODS = ["ea_society_id", "glottocode", "iso639_3"]
+POLYGON_SOURCES = ["murdock_map", "greg", "geoepr"]
+# preferred_name is taken from the highest-priority source present in a cluster
+NAME_PRIORITY = ["dplace_ea", "glottolog", "murdock_map", "joshua_project", "geoepr", "greg"]
+
+# key Ethnographic Atlas traits surfaced onto the canonical row
+TRAIT_VARS = {
+    "trait_subsistence": "EA042",
+    "trait_settlement": "EA030",
+    "trait_politics": "EA033",
+    "trait_descent": "EA043",
+    "trait_class": "EA066",
+}
+
+CANON_COLUMNS = [
+    "canonical_id", "preferred_name", "alt_names", "sources", "n_sources",
+    "glottocode", "iso639_3", "ea_society_id", "language_family",
+    "lat", "lon", "area_sqkm", "has_historical", "has_modern",
+    "historical_wkt", "modern_wkt",
+    "population_total", "primary_religion",
+    "trait_subsistence", "trait_settlement", "trait_politics", "trait_descent", "trait_class",
+    "member_record_ids", "merge_confidence", "needs_review", "geometry",
+]
+
+
+class UnionFind:
+    def __init__(self, ids):
+        self.parent = {i: i for i in ids}
+        self.sz = {i: 1 for i in ids}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return ra
+        if self.sz[ra] < self.sz[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        self.sz[ra] += self.sz[rb]
+        return ra
+
+    def size(self, x):
+        return self.sz[self.find(x)]
+
+
+def _fuzzy_candidates(groups, recall=0.85):
+    """Top-1 fuzzy name matches (both directions) between polygon sources,
+    annotated with score and whether the match is reciprocal."""
+    try:
+        from rapidfuzz import fuzz, process
+    except ImportError:
+        warnings.warn("rapidfuzz not installed -- entity resolution uses exact links only.")
+        return []
+    present = [s for s in POLYGON_SOURCES if (groups["source"] == s).any()]
+    cand = []
+    for sa, sb in itertools.combinations(present, 2):
+        A = groups[(groups["source"] == sa) & groups["name"].notna()]
+        B = groups[(groups["source"] == sb) & groups["name"].notna()]
+        if A.empty or B.empty:
+            continue
+        na, nb = A["name"].tolist(), B["name"].tolist()
+        ida, idb = A["record_id"].tolist(), B["record_id"].tolist()
+        M = process.cdist(na, nb, scorer=fuzz.token_sort_ratio)
+        best_b = M.argmax(axis=1)
+        best_a = M.argmax(axis=0)
+        seen = set()
+        for i, j in enumerate(best_b):
+            s = float(M[i, j]) / 100
+            if s >= recall:
+                cand.append({"a": ida[i], "b": idb[j], "score": round(s, 3),
+                             "name_a": na[i], "name_b": nb[j],
+                             "reciprocal": bool(best_a[j] == i)})
+                seen.add((i, j))
+        for j, i in enumerate(best_a):  # reverse direction, avoid dupes
+            if (i, j) in seen:
+                continue
+            s = float(M[i, j]) / 100
+            if s >= recall:
+                cand.append({"a": ida[i], "b": idb[j], "score": round(s, 3),
+                             "name_a": na[i], "name_b": nb[j],
+                             "reciprocal": bool(best_b[i] == j)})
+    return cand
+
+
+def resolve_entities(groups, links, traits=None, *, fuzzy_merge=0.92, fuzzy_recall=0.85):
+    groups = groups.reset_index(drop=True).copy()
+    uf = UnionFind(groups["record_id"].tolist())
+
+    # --- 1. exact-code unions ---
+    exact = links[links["method"].isin(EXACT_METHODS)]
+    for a, b in exact[["record_id_a", "record_id_b"]].itertuples(index=False):
+        if a in uf.parent and b in uf.parent:
+            uf.union(a, b)
+
+    # --- 2. name-based merges between the code-less polygon sources ---
+    # An EXACT normalized-name match merges regardless of reciprocity (identical
+    # ethnonyms are strong evidence; the reciprocity guard is only there to make
+    # APPROXIMATE matches safe). Fuzzy matches still require reciprocity + the
+    # >= fuzzy_merge threshold. Either way the singleton rule means a name edge
+    # can attach a lone territory to an entity but never fuse two built entities.
+    cand = _fuzzy_candidates(groups, recall=fuzzy_recall)
+    name_scores = {}   # root -> min score of name edges used
+    review = []
+    for c in sorted(cand, key=lambda x: -x["score"]):
+        a, b, s = c["a"], c["b"], c["score"]
+        if a not in uf.parent or b not in uf.parent:
+            continue
+        ra, rb = uf.find(a), uf.find(b)
+        if ra == rb:
+            continue
+        exact_name = s >= 0.999
+        mergeable = exact_name or (s >= fuzzy_merge and c["reciprocal"])
+        if mergeable and min(uf.size(ra), uf.size(rb)) == 1:
+            root = uf.union(a, b)
+            name_scores[root] = min(name_scores.get(root, 1.0), s)
+        else:
+            reason = ("would_merge_two_entities" if mergeable          # blocked by singleton rule
+                      else "non_reciprocal" if not c["reciprocal"]
+                      else "below_threshold")
+            review.append({**c, "decision": reason})
+
+    # propagate name-score minima to final roots (roots can change after later unions)
+    final_fuzzy = {}
+    for root, s in name_scores.items():
+        fr = uf.find(root)
+        final_fuzzy[fr] = min(final_fuzzy.get(fr, 1.0), s)
+
+    # --- 3. assign stable canonical ids ---
+    groups["_root"] = groups["record_id"].map(uf.find)
+    order = (groups.groupby("_root").size().sort_values(ascending=False).index.tolist())
+    root2id = {r: f"AEG-{i + 1:05d}" for i, r in enumerate(order)}
+    groups["canonical_id"] = groups["_root"].map(root2id)
+
+    # --- 4. build canonical rows ---
+    trait_map = None
+    if traits is not None and len(traits):
+        tsel = traits[traits["var_id"].isin(TRAIT_VARS.values())]
+        trait_map = tsel.pivot_table(index="ea_society_id", columns="var_id",
+                                      values="value_label", aggfunc="first")
+
+    rows = []
+    for root, members in groups.groupby("_root"):
+        cid = root2id[root]
+        rows.append(_build_entity(cid, members, trait_map, final_fuzzy.get(root)))
+    canonical = gpd.GeoDataFrame(rows, columns=CANON_COLUMNS, geometry="geometry",
+                                 crs="EPSG:4326")
+
+    review_df = pd.DataFrame(
+        review, columns=["a", "b", "name_a", "name_b", "score", "reciprocal", "decision"]
+    ).sort_values("score", ascending=False).reset_index(drop=True)
+
+    groups = groups.drop(columns=["_root"])
+    return {"canonical": canonical, "review_candidates": review_df, "groups": groups}
+
+
+def _mode(series):
+    s = series.dropna()
+    s = s[s.astype(str).str.len() > 0]
+    return s.mode().iloc[0] if not s.empty else None
+
+
+def _union_geom(members, source):
+    sub = members[(members["source"] == source) & members.geometry.notna()]
+    if sub.empty:
+        return None
+    geoms = sub.geometry
+    invalid = ~geoms.is_valid  # source polygons are often self-intersecting
+    if invalid.any():
+        geoms = geoms.copy()
+        geoms.loc[invalid] = geoms.loc[invalid].buffer(0)
+    try:
+        geom = geoms.union_all()
+    except Exception:
+        geom = geoms.buffer(0).union_all()  # last-ditch repair
+    return geom if (geom is not None and not geom.is_empty) else None
+
+
+def _build_entity(cid, members, trait_map, fuzzy_min):
+    sources = sorted(members["source"].unique().tolist())
+    # preferred name by source priority
+    pref = None
+    for src in NAME_PRIORITY:
+        hit = members[(members["source"] == src) & members["name"].notna()]
+        if not hit.empty:
+            pref = hit.iloc[0]["name"]
+            break
+    if pref is None:
+        nm = members["name"].dropna()
+        pref = nm.iloc[0] if not nm.empty else cid
+    alt = sorted({n for n in members["name"].dropna().tolist() if n != pref})
+
+    glotto = _mode(members["glottocode"])
+    iso = _mode(members["iso639_3"])
+    ea = _mode(members["ea_society_id"])
+
+    # language family glottocode from glottolog members' attrs
+    fam = None
+    gl = members[members["source"] == "glottolog"]
+    for attr in gl["source_attrs"].dropna():
+        try:
+            fam = json.loads(attr).get("Family_ID") or fam
+        except Exception:
+            pass
+
+    hist = _union_geom(members, "murdock_map")
+    modern = _union_geom(members, "geoepr")
+    primary = hist or modern
+    if primary is None:  # fall back to a representative point
+        pts = members[members.geometry.notna()]
+        primary = pts.geometry.union_all().centroid if not pts.empty else None
+
+    area = None
+    if hist is not None:
+        area = float(gpd.GeoSeries([hist], crs=4326).to_crs(6933).area.iloc[0] / 1e6)
+
+    rep = primary.centroid if (primary is not None and primary.geom_type != "Point") else primary
+    lat = rep.y if rep is not None else _mode(members["lat"])
+    lon = rep.x if rep is not None else _mode(members["lon"])
+
+    jp = members[members["source"] == "joshua_project"]
+    pop = float(jp["population"].dropna().sum()) if not jp.empty else None
+    religion = _mode(jp["primary_religion"]) if not jp.empty else None
+
+    traits_out = {k: None for k in TRAIT_VARS}
+    if trait_map is not None and ea in getattr(trait_map, "index", []):
+        trow = trait_map.loc[ea]
+        for col, var in TRAIT_VARS.items():
+            if var in trait_map.columns:
+                v = trow.get(var)
+                traits_out[col] = None if pd.isna(v) else v
+
+    # name_min is None for pure code-linked entities, else the weakest name edge.
+    # Any name-based merge is flagged for review (even an exact-name one).
+    conf = 1.0 if fuzzy_min is None else round(fuzzy_min, 3)
+    needs_review = fuzzy_min is not None
+    return {
+        "canonical_id": cid,
+        "preferred_name": pref,
+        "alt_names": json.dumps(alt, ensure_ascii=False) if alt else None,
+        "sources": json.dumps(sources),
+        "n_sources": len(sources),
+        "glottocode": glotto,
+        "iso639_3": iso,
+        "ea_society_id": ea,
+        "language_family": fam,
+        "lat": lat,
+        "lon": lon,
+        "area_sqkm": area,
+        "has_historical": hist is not None,
+        "has_modern": modern is not None,
+        "historical_wkt": hist.wkt if hist is not None else None,
+        "modern_wkt": modern.wkt if modern is not None else None,
+        "population_total": pop,
+        "primary_religion": religion,
+        **traits_out,
+        "member_record_ids": json.dumps(members["record_id"].tolist()),
+        "merge_confidence": conf,
+        "needs_review": needs_review,
+        "geometry": primary,
+    }

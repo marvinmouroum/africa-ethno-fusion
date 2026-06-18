@@ -14,7 +14,7 @@ import pandas as pd
 from shapely.geometry import Point
 
 from . import schema
-from .io_utils import cached_download, clip_africa
+from .io_utils import cached_download, clip_africa, clip_africa_landmass
 
 # ---------------------------------------------------------------------------
 # 1. Murdock 1959 map (Nunn digitization)  -- territory polygons
@@ -104,7 +104,7 @@ def load_greg() -> gpd.GeoDataFrame:
         parts.append(schema.finalize_groups(df, sub.geometry, "greg"))
     out = pd.concat(parts, ignore_index=True) if parts else schema.empty_groups()
     out = gpd.GeoDataFrame(out, geometry="geometry", crs="EPSG:4326")
-    return clip_africa(out)
+    return clip_africa_landmass(out)  # GREG is global -> clip to African landmass
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,8 @@ def load_geoepr() -> gpd.GeoDataFrame:
     df["source_attrs"] = schema.jsonify_attrs(
         g, ["gwid", "groupid", "gwgroupid", "umbrella", "type"]
     )
-    return clip_africa(schema.finalize_groups(df, g.geometry, "geoepr"))
+    # GeoEPR is global -> clip to the African landmass
+    return clip_africa_landmass(schema.finalize_groups(df, g.geometry, "geoepr"))
 
 
 # ---------------------------------------------------------------------------
