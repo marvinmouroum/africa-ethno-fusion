@@ -29,7 +29,7 @@ SOURCES = {
     "dplace_ea":      "D-PLACE Ethnographic Atlas -- society focal points + cultural trait data.",
     "glottolog":      "Glottolog languoids -- language reference points (the iso639_3 <-> glottocode bridge).",
     "joshua_project": "Joshua Project -- contemporary people-group points (population, religion).",
-    "glottography":   "Glottography (Asher & Moseley 2007) -- open language-area polygons keyed on glottocode.",
+    "glottography":   "Glottography (Asher & Moseley 2007, 'Atlas of the World's Languages') -- open language-AREA polygons (open alternative to commercial WLMS), one per Glottolog language-level languoid, keyed on glottocode; traditional/historical layer by default.",
     # gated, local-file only:
     "afrobarometer":  "Afrobarometer geocoded -- self-reported ethnicity at locality level (gated).",
     "dhs":            "DHS -- ethnicity (V131) at displaced cluster centroids (gated).",
