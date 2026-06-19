@@ -149,6 +149,32 @@ author** (Marvin Mouroum). See [`LICENSE`](LICENSE).
 > The third-party *datasets* this tool downloads keep their own licenses (see the
 > Sources table above); MIT covers this pipeline code, not the underlying data.
 
+## For researchers
+
+If you use this in research, **cite the software** (see [`CITATION.cff`](CITATION.cff))
+**and the upstream datasets** you rely on (full citations + licenses in
+[`PROVENANCE.md`](PROVENANCE.md)). A short JOSS-style writeup is in [`paper.md`](paper.md).
+
+**How it relates to existing work.** [LEDA](https://doi.org/10.1177/00223433211016528)
+(Müller-Crepon, Pengl & Bormann, 2022) is the reference solution for *linking ethnic
+identity categories* across datasets via the Ethnologue tree. This project is
+**complementary** — it solves *fusion + spatialisation + presentation*: one map-ready
+geometry per group enriched with cultural traits, language family, and population.
+
+| resource | what it provides | what it does *not* |
+|---|---|---|
+| **LEDA** | rigorous category↔category linking (11 datasets, Ethnologue tree) | traits, fused geometry, population, Glottolog, a map |
+| DGCE / Extended EA | Glottolog ⇄ Ethnographic Atlas traits | spatial territories, conflict/demographic layers |
+| Glottography | language-area polygons | cultural traits, demography, identity reconciliation |
+| **africa-ethno-fusion** | **fused, map-ready, trait+language+population per group, auditable crosswalk, explorer** | novel linking method (uses name/code matching; LEDA can back this) |
+
+**Worked example — attach pre-colonial political complexity to a group's territory:**
+```python
+import geopandas as gpd
+c = gpd.read_parquet("out/canonical.parquet")
+c.loc[c.preferred_name == "Kikuyu", ["trait_politics", "population_total", "area_sqkm"]]
+```
+
 ## Caveats baked into the data
 
 * Ethnic-homeland polygons imply crisp borders that don't exist; groups overlap & migrate.

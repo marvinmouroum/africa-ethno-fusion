@@ -1,0 +1,91 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata below, AND cite the
+  underlying datasets you rely on (see PROVENANCE.md for the per-source citations).
+title: >-
+  africa-ethno-fusion: a reproducible pipeline that fuses open datasets on African
+  ethnic groups into one map-ready spatial dataset
+abstract: >-
+  africa-ethno-fusion integrates the major open datasets that map which ethnic
+  groups live where in Africa — Murdock's ethnolinguistic map, GREG, GeoEPR, the
+  D-PLACE Ethnographic Atlas, Glottolog, Glottography language areas, and Joshua
+  Project — into a single GeoPandas star schema and a resolved, one-row-per-group
+  canonical layer enriched with cultural traits, language family, territory, and
+  population. It ships a reproducible Python pipeline, an auditable crosswalk with
+  per-link confidence, and an interactive web map.
+type: software
+authors:
+  - given-names: Marvin
+    family-names: Mouroum
+    # TODO before submission: add your ORCID  ->  orcid: "https://orcid.org/0000-0000-0000-0000"
+    affiliation: Independent researcher
+version: 0.2.0
+date-released: "2026-06-19"
+license: MIT
+repository-code: "https://github.com/marvinmouroum/africa-ethno-fusion"
+url: "https://marvinmouroum.github.io/africa-ethno-fusion/"
+keywords:
+  - Africa
+  - ethnic groups
+  - ethnolinguistic geography
+  - data integration
+  - entity resolution
+  - GeoPandas
+  - Ethnographic Atlas
+  - Glottolog
+references:
+  - type: article
+    authors:
+      - {given-names: "Carl", family-names: "Müller-Crepon"}
+      - {given-names: "Yannick", family-names: "Pengl"}
+      - {given-names: "Nils-Christian", family-names: "Bormann"}
+    title: "Linking Ethnic Data from Africa (LEDA)"
+    journal: "Journal of Peace Research"
+    year: 2022
+    volume: 59
+    issue: 3
+    start: 425
+    end: 435
+    doi: "10.1177/00223433211016528"
+  - type: article
+    authors:
+      - {given-names: "Nils B.", family-names: "Weidmann"}
+      - {given-names: "Jan Ketil", family-names: "Rød"}
+      - {given-names: "Lars-Erik", family-names: "Cederman"}
+    title: "Representing Ethnic Groups in Space: A New Dataset"
+    journal: "Journal of Peace Research"
+    year: 2010
+    volume: 47
+    issue: 4
+    start: 491
+    end: 499
+    doi: "10.1177/0022343310368352"
+  - type: article
+    authors:
+      - {given-names: "Manuel", family-names: "Vogt"}
+      - {given-names: "Nils-Christian", family-names: "Bormann"}
+      - {given-names: "Seraina", family-names: "Rüegger"}
+      - {given-names: "Lars-Erik", family-names: "Cederman"}
+      - {given-names: "Philipp", family-names: "Hunziker"}
+      - {given-names: "Luc", family-names: "Girardin"}
+    title: >-
+      Integrating Data on Ethnicity, Geography, and Conflict: The Ethnic Power
+      Relations Data Set Family
+    journal: "Journal of Conflict Resolution"
+    year: 2015
+    volume: 59
+    issue: 7
+    start: 1327
+    end: 1342
+    doi: "10.1177/0022002715591215"
+  - type: article
+    authors:
+      - {given-names: "Kathryn R.", family-names: "Kirby"}
+      - {name: "et al."}
+    title: >-
+      D-PLACE: A Global Database of Cultural, Linguistic and Environmental Diversity
+    journal: "PLOS ONE"
+    year: 2016
+    volume: 11
+    issue: 7
+    doi: "10.1371/journal.pone.0158391"

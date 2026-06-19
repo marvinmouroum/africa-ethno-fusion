@@ -1,0 +1,23 @@
+{
+  "title": "africa-ethno-fusion: a reproducible pipeline fusing open datasets on African ethnic groups",
+  "description": "Integrates the major open datasets that map which ethnic groups live where in Africa (Murdock map, GREG, GeoEPR, D-PLACE Ethnographic Atlas, Glottolog, Glottography, Joshua Project) into one GeoPandas star schema and a resolved one-row-per-group canonical layer enriched with cultural traits, language family, territory and population, plus an auditable crosswalk and an interactive web map. This deposit archives the pipeline and ID-level crosswalk; the merged corpus is rebuilt from source (some inputs are non-commercial — see PROVENANCE.md).",
+  "upload_type": "software",
+  "license": "MIT",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Mouroum, Marvin",
+      "affiliation": "Independent researcher"
+    }
+  ],
+  "keywords": [
+    "Africa",
+    "ethnic groups",
+    "ethnolinguistic geography",
+    "data integration",
+    "entity resolution",
+    "GeoPandas",
+    "Ethnographic Atlas",
+    "Glottolog"
+  ]
+}
